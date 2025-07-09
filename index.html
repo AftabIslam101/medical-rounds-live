@@ -4,7 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Medical Rounds Live</title>
+    <!-- Tailwind CSS CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Google Fonts - Inter -->
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
         body {
@@ -30,73 +32,98 @@
 <body>
     <div id="root"></div>
 
+    <!-- React and ReactDOM CDN (for development/simple deployment) -->
     <script src="https://unpkg.com/react/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom/umd/react-dom.production.min.js"></script>
+    <!-- Babel for JSX transformation in the browser (for development/simple deployment) -->
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
-    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-auth.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-firestore.js"></script>
+    <!-- Firebase JS SDKs (Modular v9/v10 approach) -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/9.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/9.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, addDoc, setDoc, updateDoc, deleteDoc, onSnapshot, collection, query, where, getDocs } from "https://www.gstatic.com/firebasejs/9.6.1/firebase-firestore.js";
 
-    <script type="text/babel">
         // Global variables from window (will be injected by Canvas or manually set for GitHub Pages)
         const appId = typeof window.__app_id !== 'undefined' ? window.__app_id : 'default-app-id';
         const firebaseConfig = typeof window.__firebase_config !== 'undefined' ? JSON.parse(window.__firebase_config) : {};
         const initialAuthToken = typeof window.__initial_auth_token !== 'undefined' ? window.__initial_auth_token : null;
 
-        // Initialize Firebase App
+        // Initialize Firebase App and services
         let app;
         let db;
         let auth;
 
         try {
-            // Using the global 'firebase' object exposed by the CDN scripts
-            app = firebase.initializeApp(firebaseConfig);
-            db = firebase.firestore(app);
-            auth = firebase.auth(app);
+            app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
         } catch (error) {
             console.error("Error initializing Firebase:", error);
-            // You might want to display a user-friendly error message here
+            // In a real app, display a user-friendly error message
         }
+
+        // MessageModal Component for custom alerts (retained for consistency with previous version)
+        const MessageModal = ({ message, type, onClose }) => {
+            const bgColor = type === 'success' ? 'bg-green-100 border-green-400 text-green-700' : 'bg-red-100 border-red-400 text-red-700';
+            const title = type === 'success' ? 'Success!' : 'Error!';
+
+            return (
+                <div className="fixed inset-0 bg-gray-600 bg-opacity-75 flex items-center justify-center p-4 z-50">
+                    <div className={`relative px-4 py-3 rounded-lg shadow-xl w-full max-w-sm ${bgColor}`}>
+                        <strong className="font-bold">{title}</strong>
+                        <span className="block sm:inline"> {message}</span>
+                        <span className="absolute top-0 bottom-0 right-0 px-4 py-3 cursor-pointer" onClick={onClose}>
+                            <svg className="fill-current h-6 w-6" role="button" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><title>Close</title><path d="M14.348 14.849a1.2 1.2 0 0 1-1.697 0L10 11.103l-2.651 3.746a1.2 1.2 0 1 1-1.697-1.697l3.746-2.651-3.746-2.651a1.2 1.2 0 1 1 1.697-1.697L10 8.897l2.651-3.746a1.2 1.2 0 1 1 1.697 1.697L11.103 10l3.746 2.651a1.2 1.2 0 0 1 0 1.698z"/></svg>
+                        </span>
+                    </div>
+                </div>
+            );
+        };
 
         // Main App Component
         const App = () => {
-            const [currentPage, setCurrentPage] = React.useState('home'); // 'home', 'login', 'residentSignUp', 'profileSetup', 'adminDashboard', 'quizPage', 'quizResults', 'registerSession', 'presentCase'
-            const [user, setUser] = React.useState(null); // Firebase authenticated user (resident or anonymous)
-            const [userId, setUserId] = React.useState(null); // UID of the authenticated user
-            const [isAdminLoggedIn, setIsAdminLoggedIn] = React.useState(false); // State for hardcoded admin login
+            const [currentPage, setCurrentPage] = React.useState('home');
+            const [user, setUser] = React.useState(null);
+            const [userId, setUserId] = React.useState(null);
+            const [isAdminLoggedIn, setIsAdminLoggedIn] = React.useState(false);
             const [isAuthReady, setIsAuthReady] = React.useState(false);
             const [sessions, setSessions] = React.useState([]);
-            const [quizzes, setQuizzes] = React.useState([]); // State to store quizzes
-            const [selectedQuiz, setSelectedQuiz] = React.useState(null); // Quiz currently being taken
-            const [quizResults, setQuizResults] = React.useState(null); // Results after a quiz
+            const [quizzes, setQuizzes] = React.useState([]);
+            const [selectedQuiz, setSelectedQuiz] = React.useState(null);
+            const [quizResults, setQuizResults] = React.useState(null);
             const [websiteContent, setWebsiteContent] = React.useState({
-                youtubeLink: 'https://www.youtube.com/embed/dQw4w9WgXcQ', // Default placeholder
-                telegramLink: 'https://t.me/yourtelegramchannel', // Default placeholder
-                whatsappLink: 'https://chat.whatsapp.com/yourwhatsappgroup', // New default placeholder
+                youtubeLink: 'https://www.youtube.com/embed/dQw4w9WgXcQ',
+                telegramLink: 'https://t.me/yourtelegramchannel',
+                whatsappLink: 'https://chat.whatsapp.com/yourwhatsappgroup',
                 heroTitle: 'Experience Real Hospital Rounds, Live Online',
                 heroSubtitle: 'Join our interactive sessions to learn, discuss, and enhance your clinical reasoning skills with experts.',
             });
             const [loading, setLoading] = React.useState(true);
             const [error, setError] = React.useState(null);
+            const [successMessage, setSuccessMessage] = React.useState(null);
             const [showRegistrationModal, setShowRegistrationModal] = React.useState(false);
             const [showCasePresentationModal, setShowCasePresentationModal] = React.useState(false);
 
-
             // Firebase Authentication Listener and Initialization
             React.useEffect(() => {
-                const unsubscribe = auth.onAuthStateChanged(async (currentUser) => {
+                const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
                     if (currentUser) {
                         setUser(currentUser);
                         setUserId(currentUser.uid);
+                        // Check if the user is an admin
+                        const adminDocRef = doc(db, `artifacts/${appId}/public/data/admins`, currentUser.uid);
+                        const adminDocSnap = await getDoc(adminDocRef);
+                        setIsAdminLoggedIn(adminDocSnap.exists());
                     } else {
                         setUser(null);
                         setUserId(null);
+                        setIsAdminLoggedIn(false); // Ensure admin status is reset on logout
                         try {
                             if (initialAuthToken) {
-                                await auth.signInWithCustomToken(initialAuthToken);
+                                await signInWithCustomToken(auth, initialAuthToken);
                             } else {
-                                await auth.signInAnonymously();
+                                await signInAnonymously(auth);
                             }
                         } catch (anonError) {
                             console.error("Error signing in anonymously:", anonError);
@@ -114,17 +141,17 @@
             React.useEffect(() => {
                 if (!isAuthReady || !db) return;
 
-                const websiteContentRef = db.collection(`artifacts/${appId}/public/data/websiteContent`).doc('mainContent');
-                const sessionsCollectionRef = db.collection(`artifacts/${appId}/public/data/sessions`);
-                const quizzesCollectionRef = db.collection(`artifacts/${appId}/public/data/quizzes`);
+                const websiteContentRef = doc(db, `artifacts/${appId}/public/data/websiteContent`, 'mainContent');
+                const sessionsCollectionRef = collection(db, `artifacts/${appId}/public/data/sessions`);
+                const quizzesCollectionRef = collection(db, `artifacts/${appId}/public/data/quizzes`);
 
                 // Listen for website content changes
-                const unsubscribeContent = websiteContentRef.onSnapshot((docSnap) => {
-                    if (docSnap.exists) {
+                const unsubscribeContent = onSnapshot(websiteContentRef, (docSnap) => {
+                    if (docSnap.exists()) {
                         setWebsiteContent(docSnap.data());
                     } else {
-                        console.log("No website content found, using defaults.");
-                        websiteContentRef.set(websiteContent, { merge: true }).catch(e => console.error("Error setting default content:", e));
+                        console.log("No website content found, setting defaults.");
+                        setDoc(websiteContentRef, websiteContent, { merge: true }).catch(e => console.error("Error setting default content:", e));
                     }
                 }, (err) => {
                     console.error("Error fetching website content:", err);
@@ -132,7 +159,7 @@
                 });
 
                 // Listen for sessions changes
-                const unsubscribeSessions = sessionsCollectionRef.onSnapshot((snapshot) => {
+                const unsubscribeSessions = onSnapshot(sessionsCollectionRef, (snapshot) => {
                     const fetchedSessions = snapshot.docs.map(doc => ({
                         id: doc.id,
                         ...doc.data()
@@ -149,7 +176,7 @@
                 });
 
                 // Listen for quizzes changes
-                const unsubscribeQuizzes = quizzesCollectionRef.onSnapshot((snapshot) => {
+                const unsubscribeQuizzes = onSnapshot(quizzesCollectionRef, (snapshot) => {
                     const fetchedQuizzes = snapshot.docs.map(doc => ({
                         id: doc.id,
                         ...doc.data()
@@ -159,7 +186,6 @@
                     console.error("Error fetching quizzes:", err);
                     setError("Failed to load quizzes.");
                 });
-
 
                 return () => {
                     unsubscribeContent();
@@ -180,13 +206,10 @@
 
             const handleLogout = async () => {
                 setError(null);
+                setSuccessMessage(null);
                 try {
-                    if (isAdminLoggedIn) {
-                        setIsAdminLoggedIn(false); // Clear hardcoded admin session
-                    }
-                    if (auth.currentUser && !auth.currentUser.isAnonymous) {
-                        await auth.signOut(); // Sign out Firebase user if not anonymous
-                    }
+                    await signOut(auth); // Use modular signOut
+                    setIsAdminLoggedIn(false); // Ensure admin status is reset
                     setCurrentPage('home');
                 } catch (err) {
                     console.error("Logout error:", err);
@@ -198,11 +221,12 @@
             const handleResidentSignUp = async (name, email, phoneNumber, speciality, collegeName, yearOfAdmission, password) => {
                 setLoading(true);
                 setError(null);
+                setSuccessMessage(null);
                 try {
-                    const userCredential = await auth.createUserWithEmailAndPassword(email, password);
+                    const userCredential = await createUserWithEmailAndPassword(auth, email, password);
                     const residentUid = userCredential.user.uid;
-                    const residentProfileRef = db.collection(`artifacts/${appId}/users/${residentUid}/profile`).doc('residentProfile');
-                    await residentProfileRef.set({
+                    const residentProfileRef = doc(db, `artifacts/${appId}/users/${residentUid}/profile`, 'residentProfile');
+                    await setDoc(residentProfileRef, {
                         name,
                         email,
                         phoneNumber,
@@ -211,7 +235,8 @@
                         yearOfAdmission,
                         createdAt: new Date().toISOString()
                     });
-                    setCurrentPage('profileSetup'); // Redirect to profile setup after successful signup
+                    setSuccessMessage("Registration successful! Please complete your profile.");
+                    setCurrentPage('profileSetup');
                 } catch (err) {
                     console.error("Resident signup error:", err);
                     setError(err.message);
@@ -224,11 +249,12 @@
             const updateResidentProfile = async (profileData) => {
                 setLoading(true);
                 setError(null);
+                setSuccessMessage(null);
                 try {
                     if (user && user.uid) {
-                        const residentProfileRef = db.collection(`artifacts/${appId}/users/${user.uid}/profile`).doc('residentProfile');
-                        await residentProfileRef.update(profileData);
-                        alert("Profile updated successfully!");
+                        const residentProfileRef = doc(db, `artifacts/${appId}/users/${user.uid}/profile`, 'residentProfile');
+                        await updateDoc(residentProfileRef, profileData);
+                        setSuccessMessage("Profile updated successfully!"); // Use MessageModal
                     } else {
                         setError("No authenticated user to update profile.");
                     }
@@ -244,31 +270,34 @@
             const addOrUpdateSession = async (sessionData) => {
                 setLoading(true);
                 setError(null);
+                setSuccessMessage(null);
                 try {
-                    const sessionsCollectionRef = db.collection(`artifacts/${appId}/public/data/sessions`);
+                    const sessionsCollectionRef = collection(db, `artifacts/${appId}/public/data/sessions`);
                     if (sessionData.id) {
-                        const sessionRef = sessionsCollectionRef.doc(sessionData.id);
-                        await sessionRef.update({
+                        const sessionRef = doc(db, `artifacts/${appId}/public/data/sessions`, sessionData.id);
+                        await updateDoc(sessionRef, {
                             title: sessionData.title,
-                            presenter: sessionData.presenter, // This is still email for leaderboard
-                            presenterName: sessionData.presenterName, // New field for display
-                            presenterCollege: sessionData.presenterCollege, // New field for display
+                            presenter: sessionData.presenter,
+                            presenterName: sessionData.presenterName,
+                            presenterCollege: sessionData.presenterCollege,
                             date: sessionData.date,
                             time: sessionData.time,
-                            meetingLink: sessionData.meetingLink, // New field
+                            meetingLink: sessionData.meetingLink,
                             approved: sessionData.approved !== undefined ? sessionData.approved : false,
                         });
+                        setSuccessMessage("Session updated successfully!");
                     } else {
-                        await sessionsCollectionRef.add({
+                        await addDoc(sessionsCollectionRef, {
                             title: sessionData.title,
-                            presenter: sessionData.presenter, // This is still email for leaderboard
-                            presenterName: sessionData.presenterName, // New field for display
-                            presenterCollege: sessionData.presenterCollege, // New field for display
+                            presenter: sessionData.presenter,
+                            presenterName: sessionData.presenterName,
+                            presenterCollege: sessionData.presenterCollege,
                             date: sessionData.date,
                             time: sessionData.time,
-                            meetingLink: sessionData.meetingLink, // New field
+                            meetingLink: sessionData.meetingLink,
                             approved: false,
                         });
+                        setSuccessMessage("Session added successfully!");
                     }
                 } catch (err) {
                     console.error("Error adding/updating session:", err);
@@ -281,10 +310,11 @@
             const deleteSession = async (sessionId) => {
                 setLoading(true);
                 setError(null);
+                setSuccessMessage(null);
                 try {
-                    const sessionsCollectionRef = db.collection(`artifacts/${appId}/public/data/sessions`);
-                    const sessionRef = sessionsCollectionRef.doc(sessionId);
-                    await sessionRef.delete();
+                    const sessionRef = doc(db, `artifacts/${appId}/public/data/sessions`, sessionId);
+                    await deleteDoc(sessionRef);
+                    setSuccessMessage("Session deleted successfully!");
                 } catch (err) {
                     console.error("Error deleting session:", err);
                     setError("Failed to delete session.");
@@ -296,10 +326,11 @@
             const updateSessionApproval = async (sessionId, isApproved) => {
                 setLoading(true);
                 setError(null);
+                setSuccessMessage(null);
                 try {
-                    const sessionsCollectionRef = db.collection(`artifacts/${appId}/public/data/sessions`);
-                    const sessionRef = sessionsCollectionRef.doc(sessionId);
-                    await sessionRef.update({ approved: isApproved });
+                    const sessionRef = doc(db, `artifacts/${appId}/public/data/sessions`, sessionId);
+                    await updateDoc(sessionRef, { approved: isApproved });
+                    setSuccessMessage(`Session ${isApproved ? 'approved' : 'rejected'} successfully!`);
                 } catch (err) {
                     console.error("Error updating session approval:", err);
                     setError("Failed to update session approval status.");
@@ -312,10 +343,12 @@
             const updateWebsiteSettings = async (settings) => {
                 setLoading(true);
                 setError(null);
+                setSuccessMessage(null);
                 try {
-                    const websiteContentRef = db.collection(`artifacts/${appId}/public/data/websiteContent`).doc('mainContent');
-                    await websiteContentRef.set(settings, { merge: true });
+                    const websiteContentRef = doc(db, `artifacts/${appId}/public/data/websiteContent`, 'mainContent');
+                    await setDoc(websiteContentRef, settings, { merge: true });
                     setWebsiteContent(settings);
+                    setSuccessMessage("Website settings updated successfully!");
                 } catch (err) {
                     console.error("Error updating website settings:", err);
                     setError("Failed to update website settings.");
@@ -328,21 +361,24 @@
             const addOrUpdateQuiz = async (quizData) => {
                 setLoading(true);
                 setError(null);
+                setSuccessMessage(null);
                 try {
-                    const quizzesCollectionRef = db.collection(`artifacts/${appId}/public/data/quizzes`);
+                    const quizzesCollectionRef = collection(db, `artifacts/${appId}/public/data/quizzes`);
                     if (quizData.id) {
-                        const quizRef = quizzesCollectionRef.doc(quizData.id);
-                        await quizRef.update({
+                        const quizRef = doc(db, `artifacts/${appId}/public/data/quizzes`, quizData.id);
+                        await updateDoc(quizRef, {
                             title: quizData.title,
                             questions: quizData.questions,
-                            duration: quizData.duration // in minutes
+                            duration: quizData.duration
                         });
+                        setSuccessMessage("Quiz updated successfully!");
                     } else {
-                        await quizzesCollectionRef.add({
+                        await addDoc(quizzesCollectionRef, {
                             title: quizData.title,
                             questions: quizData.questions,
-                            duration: quizData.duration // in minutes
+                            duration: quizData.duration
                         });
+                        setSuccessMessage("Quiz added successfully!");
                     }
                 } catch (err) {
                     console.error("Error adding/updating quiz:", err);
@@ -355,10 +391,11 @@
             const deleteQuiz = async (quizId) => {
                 setLoading(true);
                 setError(null);
+                setSuccessMessage(null);
                 try {
-                    const quizzesCollectionRef = db.collection(`artifacts/${appId}/public/data/quizzes`);
-                    const quizRef = quizzesCollectionRef.doc(quizId);
-                    await quizRef.delete();
+                    const quizRef = doc(db, `artifacts/${appId}/public/data/quizzes`, quizId);
+                    await deleteDoc(quizRef);
+                    setSuccessMessage("Quiz deleted successfully!");
                 } catch (err) {
                     console.error("Error deleting quiz:", err);
                     setError("Failed to delete quiz.");
@@ -373,16 +410,17 @@
                     return;
                 }
                 setSelectedQuiz(quiz);
-                setQuizResults(null); // Clear previous results
+                setQuizResults(null);
                 setCurrentPage('quizPage');
             };
 
             const submitQuizResults = async (quizId, participantId, answers, score, totalQuestions, durationTaken) => {
                 setLoading(true);
                 setError(null);
+                setSuccessMessage(null);
                 try {
-                    const submissionsCollectionRef = db.collection(`artifacts/${appId}/public/data/quizSubmissions`);
-                    await submissionsCollectionRef.add({
+                    const submissionsCollectionRef = collection(db, `artifacts/${appId}/public/data/quizSubmissions`);
+                    await addDoc(submissionsCollectionRef, {
                         quizId,
                         participantId,
                         answers,
@@ -391,7 +429,8 @@
                         durationTaken,
                         timestamp: new Date().toISOString()
                     });
-                    setQuizResults({ score, totalQuestions, answers, quizId }); // Store results to display
+                    setSuccessMessage("Quiz results submitted successfully!");
+                    setQuizResults({ score, totalQuestions, answers, quizId });
                     setCurrentPage('quizResults');
                 } catch (err) {
                     console.error("Error submitting quiz results:", err);
@@ -405,11 +444,12 @@
             const handleRegisterForSession = async (formData) => {
                 setLoading(true);
                 setError(null);
+                setSuccessMessage(null);
                 try {
-                    // In a real application, replace this with your Google Apps Script Web App URL
+                    // IMPORTANT: Replace 'YOUR_GOOGLE_SHEETS_REGISTRATION_WEB_APP_URL' with your actual Google Apps Script Web App URL
                     const response = await fetch('YOUR_GOOGLE_SHEETS_REGISTRATION_WEB_APP_URL', {
                         method: 'POST',
-                        mode: 'no-cors', // Required for Google Apps Script if not handling CORS explicitly
+                        mode: 'no-cors',
                         headers: {
                             'Content-Type': 'application/json',
                         },
@@ -418,9 +458,8 @@
                             ...formData
                         }),
                     });
-                    // For no-cors, response.ok will always be true, so rely on the script's success logic
                     console.log("Registration form submitted (check Google Apps Script logs for actual success):", formData);
-                    alert("Thank you for registering! We will get back to you soon.");
+                    setSuccessMessage("Thank you for registering! We will get back to you soon."); // Use MessageModal
                     setShowRegistrationModal(false);
                 } catch (err) {
                     console.error("Error submitting registration form:", err);
@@ -433,11 +472,12 @@
             const handlePresentCase = async (formData) => {
                 setLoading(true);
                 setError(null);
+                setSuccessMessage(null);
                 try {
-                    // In a real application, replace this with your Google Apps Script Web App URL
+                    // IMPORTANT: Replace 'YOUR_GOOGLE_SHEETS_CASE_PRESENTATION_WEB_APP_URL' with your actual Google Apps Script Web App URL
                     const response = await fetch('YOUR_GOOGLE_SHEETS_CASE_PRESENTATION_WEB_APP_URL', {
                         method: 'POST',
-                        mode: 'no-cors', // Required for Google Apps Script if not handling CORS explicitly
+                        mode: 'no-cors',
                         headers: {
                             'Content-Type': 'application/json',
                         },
@@ -447,7 +487,7 @@
                         }),
                     });
                     console.log("Case presentation form submitted (check Google Apps Script logs for actual success):", formData);
-                    alert("Thank you for your submission! We will review your case and get back to you.");
+                    setSuccessMessage("Thank you for your submission! We will review your case and get back to you."); // Use MessageModal
                     setShowCasePresentationModal(false);
                 } catch (err) {
                     console.error("Error submitting case presentation form:", err);
@@ -456,7 +496,6 @@
                     setLoading(false);
                 }
             };
-
 
             if (loading && !isAuthReady) {
                 return (
@@ -484,20 +523,20 @@
                             <div className="space-x-4">
                                 <button onClick={() => setCurrentPage('home')} className="hover:text-blue-300 transition duration-200">Home</button>
 
-                                {!user && !isAdminLoggedIn ? ( // Not logged in as any user
+                                {!user && !isAdminLoggedIn ? (
                                     <>
                                         <button onClick={() => setCurrentPage('residentSignUp')} className="hover:text-blue-300 transition duration-200">Sign Up (Resident)</button>
                                         <button onClick={() => setCurrentPage('login')} className="hover:text-blue-300 transition duration-200">Login</button>
                                     </>
                                 ) : (
                                     <>
-                                        {user && !user.isAnonymous && ( // Logged in as a resident
+                                        {user && !user.isAnonymous && (
                                             <>
                                                 <span className="text-gray-300 text-sm">Welcome, Resident!</span>
                                                 <button onClick={() => setCurrentPage('profileSetup')} className="hover:text-blue-300 transition duration-200">Profile</button>
                                             </>
                                         )}
-                                        {isAdminLoggedIn && ( // Logged in as admin
+                                        {isAdminLoggedIn && (
                                             <>
                                                 <span className="text-gray-300 text-sm">Welcome, Admin!</span>
                                                 <button onClick={() => setCurrentPage('adminDashboard')} className="hover:text-blue-300 transition duration-200">Admin Dashboard</button>
@@ -510,15 +549,8 @@
                         </div>
                     </nav>
 
-                    {error && (
-                        <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mx-auto mt-4 max-w-xl" role="alert">
-                            <strong className="font-bold">Error!</strong>
-                            <span className="block sm:inline"> {error}</span>
-                            <span className="absolute top-0 bottom-0 right-0 px-4 py-3" onClick={() => setError(null)}>
-                                <svg className="fill-current h-6 w-6 text-red-500" role="button" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><title>Close</title><path d="M14.348 14.849a1.2 1.2 0 0 1-1.697 0L10 11.103l-2.651 3.746a1.2 1.2 0 1 1-1.697-1.697l3.746-2.651-3.746-2.651a1.2 1.2 0 1 1 1.697-1.697L10 8.897l2.651-3.746a1.2 1.2 0 1 1 1.697 1.697L11.103 10l3.746 2.651a1.2 1.2 0 0 1 0 1.698z"/></svg>
-                            </span>
-                        </div>
-                    )}
+                    {error && <MessageModal message={error} type="error" onClose={() => setError(null)} />}
+                    {successMessage && <MessageModal message={successMessage} type="success" onClose={() => setSuccessMessage(null)} />}
 
                     {currentPage === 'home' && (
                         <HomePage
@@ -528,7 +560,7 @@
                             onStartQuiz={startQuiz}
                             onRegisterForSession={() => setShowRegistrationModal(true)}
                             onPresentCase={() => setShowCasePresentationModal(true)}
-                            currentUserEmail={user?.email} // Pass current user's email for ranking
+                            currentUserEmail={user?.email}
                         />
                     )}
 
@@ -574,9 +606,9 @@
                     {currentPage === 'quizPage' && selectedQuiz && (
                         <QuizPage
                             quiz={selectedQuiz}
-                            participantId={user ? user.uid : 'anonymous'} // Use Firebase UID for resident
+                            participantId={user ? user.uid : 'anonymous'}
                             onSubmitResults={submitQuizResults}
-                            onQuizEnd={() => setCurrentPage('home')} // Go home if quiz ends without submission
+                            onQuizEnd={() => setCurrentPage('home')}
                             loading={loading}
                         />
                     )}
@@ -584,7 +616,7 @@
                     {currentPage === 'quizResults' && quizResults && (
                         <QuizResultsPage
                             quizResults={quizResults}
-                            quizzes={quizzes} // Pass quizzes to get original quiz data
+                            quizzes={quizzes}
                             onReturnHome={() => setCurrentPage('home')}
                         />
                     )}
@@ -613,7 +645,7 @@
                             onClick={onClose}
                             className="absolute top-3 right-3 text-gray-500 hover:text-gray-700 text-2xl font-bold"
                         >
-                            ×
+                            &times;
                         </button>
                         {children}
                     </div>
@@ -785,9 +817,8 @@
 
         // Home Page Component
         const HomePage = ({ websiteContent, sessions, quizzes, onStartQuiz, onRegisterForSession, onPresentCase, currentUserEmail }) => {
-            const [selectedDate, setSelectedDate] = React.useState(new Date().toISOString().slice(0, 10)); //ISO 8601 format
+            const [selectedDate, setSelectedDate] = React.useState(new Date().toISOString().slice(0, 10));
 
-            // Filter sessions to get the next 3 upcoming and past 2 events
             const getFeaturedSessions = React.useCallback(() => {
                 const now = new Date();
                 const approvedSessions = sessions.filter(session => session.approved);
@@ -795,7 +826,6 @@
                 const upcoming = [];
                 const past = [];
 
-                // Sort all approved sessions by date and time
                 const sortedSessions = [...approvedSessions].sort((a, b) => {
                     const dateTimeA = new Date(`${a.date}T${a.time}`);
                     const dateTimeB = new Date(`${b.date}T${b.time}`);
@@ -811,10 +841,7 @@
                     }
                 });
 
-                // Get the next 3 upcoming sessions
                 const next3Upcoming = upcoming.slice(0, 3);
-
-                // Get the last 2 past sessions (most recent first)
                 const last2Past = past.reverse().slice(0, 2);
 
                 return { next3Upcoming, last2Past };
@@ -822,13 +849,10 @@
 
             const { next3Upcoming, last2Past } = getFeaturedSessions();
 
-
-            // Filter sessions to only show approved ones for the selected date for the calendar
             const filteredSessionsForCalendar = sessions.filter(session =>
                 session.approved && session.date === selectedDate
             );
 
-            // Generate 30 days for the calendar
             const getCalendarDays = () => {
                 const days = [];
                 const today = new Date();
@@ -926,7 +950,6 @@
                             )}
                         </div>
                     </section>
-
 
                     {/* Upcoming Sessions Section with Calendar */}
                     <section className="py-16 px-4 sm:px-6 lg:px-8 bg-gray-50">
@@ -1074,7 +1097,7 @@
                     {/* Footer */}
                     <footer className="bg-slate-800 text-white py-8 px-4 sm:px-6 lg:px-8 text-center rounded-t-lg">
                         <div className="container mx-auto">
-                            <p>© 2025 Medical Rounds Live. All rights reserved.</p>
+                            <p>&copy; 2025 Medical Rounds Live. All rights reserved.</p>
                             <div className="mt-4 text-sm">
                                 <a href="#" className="text-gray-400 hover:text-white mx-2">Privacy Policy</a>
                                 <span className="text-gray-400">|</span>
@@ -1110,31 +1133,36 @@
             );
         };
 
-
         // Unified Login Page Component
         const UnifiedLoginPage = ({ onLoginSuccess, loading, firebaseAuth, onError }) => {
-            const [loginType, setLoginType] = React.useState('resident'); // 'resident' or 'admin'
+            const [loginType, setLoginType] = React.useState('resident');
             const [email, setEmail] = React.useState('');
             const [password, setPassword] = React.useState('');
 
             const handleLoginSubmit = async (e) => {
                 e.preventDefault();
-                onError(null); // Clear previous errors
+                onError(null);
 
                 if (loginType === 'admin') {
-                    // Hardcoded admin credentials
-                    const ADMIN_EMAIL = 'aftab@marrowmed.com';
-                    const ADMIN_PASSWORD = 'Dailyrounds@123';
+                    try {
+                        const userCredential = await signInWithEmailAndPassword(firebaseAuth, email, password);
+                        const adminDocRef = doc(db, `artifacts/${appId}/public/data/admins`, userCredential.user.uid);
+                        const adminDocSnap = await getDoc(adminDocRef);
 
-                    if (email === ADMIN_EMAIL && password === ADMIN_PASSWORD) {
-                        onLoginSuccess('admin'); // Notify parent of successful admin login
-                    } else {
-                        onError("Invalid admin email or password.");
+                        if (adminDocSnap.exists()) {
+                            onLoginSuccess('admin');
+                        } else {
+                            await signOut(firebaseAuth); // Log out non-admin user
+                            onError("You do not have admin privileges.");
+                        }
+                    } catch (err) {
+                        console.error("Admin login error:", err);
+                        onError(err.message || "Admin login failed. Please check your credentials.");
                     }
                 } else { // Resident login
                     try {
-                        await firebaseAuth.signInWithEmailAndPassword(email, password);
-                        onLoginSuccess('resident'); // Notify parent of successful resident login (Firebase handles user state)
+                        await signInWithEmailAndPassword(firebaseAuth, email, password);
+                        onLoginSuccess('resident');
                     } catch (err) {
                         console.error("Resident login error:", err);
                         onError(err.message || "Login failed. Please check your email and password.");
@@ -1204,7 +1232,7 @@
                             </div>
                             {loginType === 'admin' && (
                                 <p className="text-center text-sm text-gray-500 mt-4">
-                                    (Admin credentials: `aftab@marrowmed.com` / `Dailyrounds@123`)
+                                    (For admin login, use a registered Firebase user email/password that has an entry in the `artifacts/{appId}/public/data/admins` collection.)
                                 </p>
                             )}
                         </form>
@@ -1230,9 +1258,9 @@
                     if (!userId) return;
                     setFetchLoading(true);
                     try {
-                        const profileRef = db.collection(`artifacts/${appId}/users/${userId}/profile`).doc('residentProfile');
-                        const docSnap = await profileRef.get();
-                        if (docSnap.exists) {
+                        const profileRef = doc(db, `artifacts/${appId}/users/${userId}/profile`, 'residentProfile');
+                        const docSnap = await getDoc(profileRef);
+                        if (docSnap.exists()) {
                             setProfileData(docSnap.data());
                         } else {
                             onError("Profile not found. Please complete your registration.");
@@ -1573,7 +1601,7 @@
                                         type="email"
                                         id="presenterEmail"
                                         className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                        value={newSession.presenter} // 'presenter' still holds the email
+                                        value={newSession.presenter}
                                         onChange={(e) => setNewSession({ ...newSession, presenter: e.target.value })}
                                         placeholder="Email for ranking (e.g., doctor@example.com)"
                                         required
@@ -1845,7 +1873,7 @@
             const [quizStarted, setQuizStarted] = React.useState(false);
             const [quizEnded, setQuizEnded] = React.useState(false);
             const timerRef = React.useRef(null);
-            const quizContainerRef = React.useRef(null); // Ref for the quiz container to apply restrictions
+            const quizContainerRef = React.useRef(null);
 
             // Prevent navigation away from the quiz
             React.useEffect(() => {
@@ -1858,34 +1886,21 @@
 
                 const handleVisibilityChange = () => {
                     if (document.hidden && !quizEnded) {
-                        // Optionally, pause timer or submit quiz if user leaves tab/window
-                        // For this implementation, we'll just log a warning.
                         console.warn("User left the quiz window!");
-                        // You could also automatically submit the quiz here:
-                        // handleSubmitQuiz(true);
                     }
                 };
 
                 window.addEventListener('beforeunload', handleBeforeUnload);
                 document.addEventListener('visibilitychange', handleVisibilityChange);
 
-                // Disable copy, cut, paste
-                const disableClipboard = (e) => e.preventDefault();
-                const quizElement = quizContainerRef.current;
-                if (quizElement) {
-                    quizElement.addEventListener('copy', disableClipboard);
-                    quizElement.addEventListener('cut', disableClipboard);
-                    quizElement.addEventListener('paste', disableClipboard);
-                }
+                // For security, browser-level restrictions on copy/cut/paste are generally preferred
+                // and more robust than JavaScript attempts to disable them, which can be inconsistent
+                // across browsers and challenging to implement perfectly within an iframe.
+                // Removing the direct clipboard event listeners as they are not fully effective.
 
                 return () => {
                     window.removeEventListener('beforeunload', handleBeforeUnload);
                     document.removeEventListener('visibilitychange', handleVisibilityChange);
-                    if (quizElement) {
-                        quizElement.removeEventListener('copy', disableClipboard);
-                        quizElement.removeEventListener('cut', disableClipboard);
-                        quizElement.removeEventListener('paste', disableClipboard);
-                    }
                 };
             }, [quizEnded]);
 
@@ -1931,7 +1946,7 @@
                 }
             };
 
-            const handleSubmitQuiz = (timedOut = true) => {
+            const handleSubmitQuiz = (timedOut = false) => {
                 clearInterval(timerRef.current);
                 setQuizEnded(true);
 
@@ -2108,7 +2123,6 @@
             );
         };
 
-
         // Leaderboard Component
         const Leaderboard = ({ sessions, currentUserEmail }) => {
             const [leaderboardData, setLeaderboardData] = React.useState([]);
@@ -2119,18 +2133,22 @@
                 const calculateLeaderboard = () => {
                     const presenterCounts = {};
                     sessions.forEach(session => {
-                        if (session.approved && session.presenter) { // Use 'presenter' (email) for ranking
+                        if (session.approved && session.presenter) {
                             presenterCounts[session.presenter] = (presenterCounts[session.presenter] || 0) + 1;
                         }
                     });
 
                     const sortedLeaderboard = Object.entries(presenterCounts)
-                        .map(([presenterEmail, count]) => ({ presenterEmail, count }))
-                        .sort((a, b) => b.count - a.count); // Sort descending by count
-                    
+                        .map(([presenterEmail, count]) => ({
+                            presenterEmail,
+                            count,
+                            // Find the presenter's name from the sessions if available, otherwise use email
+                            presenterName: sessions.find(s => s.presenter === presenterEmail)?.presenterName || presenterEmail
+                        }))
+                        .sort((a, b) => b.count - a.count);
+
                     setLeaderboardData(sortedLeaderboard);
 
-                    // Calculate current user's rank
                     if (currentUserEmail) {
                         const userEntry = sortedLeaderboard.find(entry => entry.presenterEmail === currentUserEmail);
                         if (userEntry) {
@@ -2148,7 +2166,7 @@
                 };
 
                 calculateLeaderboard();
-            }, [sessions, currentUserEmail]); // Recalculate when sessions or current user email changes
+            }, [sessions, currentUserEmail]);
 
             return (
                 <section className="py-16 px-4 sm:px-6 lg:px-8 bg-white">
@@ -2176,7 +2194,7 @@
                                     {leaderboardData.map((entry, index) => (
                                         <li key={entry.presenterEmail} className="py-3 flex justify-between items-center">
                                             <span className="font-semibold text-lg text-slate-800">
-                                                {index + 1}. {entry.presenterEmail} {/* Display email for now */}
+                                                {index + 1}. {entry.presenterName}
                                             </span>
                                             <span className="text-blue-600 font-bold text-xl">
                                                 {entry.count}
@@ -2193,10 +2211,12 @@
         };
 
         // Render the React App
-        ReactDOM.render(
-            React.createElement(App),
-            document.getElementById('root')
-        );
+        window.onload = function() {
+            ReactDOM.render(
+                React.createElement(App),
+                document.getElementById('root')
+            );
+        };
     </script>
 </body>
 </html>
