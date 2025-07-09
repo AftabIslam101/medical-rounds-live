@@ -1,0 +1,2165 @@
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged, signOut, createUserWithEmailAndPassword, signInWithEmailAndPassword } from 'firebase/auth';
+import { getFirestore, collection, query, onSnapshot, doc, addDoc, updateDoc, deleteDoc, setDoc, getDoc, getDocs } from 'firebase/firestore';
+
+// Global variables provided by the Canvas environment
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+// Initialize Firebase App
+let app;
+let db;
+let auth;
+
+try {
+    app = initializeApp(firebaseConfig);
+    db = getFirestore(app);
+    auth = getAuth(app);
+} catch (error) {
+    console.error("Error initializing Firebase:", error);
+    // You might want to display a user-friendly error message here
+}
+
+// Main App Component
+const App = () => {
+    const [currentPage, setCurrentPage] = useState('home'); // 'home', 'login', 'residentSignUp', 'profileSetup', 'adminDashboard', 'quizPage', 'quizResults', 'registerSession', 'presentCase'
+    const [user, setUser] = useState(null); // Firebase authenticated user (resident or anonymous)
+    const [userId, setUserId] = useState(null); // UID of the authenticated user
+    const [isAdminLoggedIn, setIsAdminLoggedIn] = useState(false); // State for hardcoded admin login
+    const [isAuthReady, setIsAuthReady] = useState(false);
+    const [sessions, setSessions] = useState([]);
+    const [quizzes, setQuizzes] = useState([]); // State to store quizzes
+    const [selectedQuiz, setSelectedQuiz] = useState(null); // Quiz currently being taken
+    const [quizResults, setQuizResults] = useState(null); // Results after a quiz
+    const [websiteContent, setWebsiteContent] = useState({
+        youtubeLink: 'https://www.youtube.com/embed/dQw4w9WgXcQ', // Default placeholder
+        telegramLink: 'https://t.me/yourtelegramchannel', // Default placeholder
+        whatsappLink: 'https://chat.whatsapp.com/yourwhatsappgroup', // New default placeholder
+        heroTitle: 'Experience Real Hospital Rounds, Live Online',
+        heroSubtitle: 'Join our interactive sessions to learn, discuss, and enhance your clinical reasoning skills with experts.',
+    });
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState(null);
+    const [showRegistrationModal, setShowRegistrationModal] = useState(false);
+    const [showCasePresentationModal, setShowCasePresentationModal] = useState(false);
+    // Removed presenterProfiles state as it's no longer needed for session cards directly
+
+
+    // Firebase Authentication Listener and Initialization
+    useEffect(() => {
+        const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+            if (currentUser) {
+                setUser(currentUser);
+                setUserId(currentUser.uid);
+            } else {
+                setUser(null);
+                setUserId(null);
+                // Important: Do NOT reset isAdminLoggedIn here. It's managed by the UnifiedLoginPage.
+                // If the Firebase user logs out, but admin was logged in via hardcoded credentials,
+                // we want to preserve that admin session until explicit admin logout.
+
+                // Sign in anonymously if no initial token or user is logged out
+                try {
+                    if (initialAuthToken) {
+                        await signInWithCustomToken(auth, initialAuthToken);
+                    } else {
+                        await signInAnonymously(auth);
+                    }
+                } catch (anonError) {
+                    console.error("Error signing in anonymously:", anonError);
+                    setError("Failed to authenticate. Please try again.");
+                }
+            }
+            setIsAuthReady(true);
+            setLoading(false);
+        });
+
+        return () => unsubscribe();
+    }, []); // Run only once on component mount
+
+    // Firestore Data Listener for Website Content, Sessions, and Quizzes
+    useEffect(() => {
+        if (!isAuthReady || !db) return;
+
+        const websiteContentRef = doc(db, `artifacts/${appId}/public/data/websiteContent`, 'mainContent');
+        const sessionsCollectionRef = collection(db, `artifacts/${appId}/public/data/sessions`);
+        const quizzesCollectionRef = collection(db, `artifacts/${appId}/public/data/quizzes`);
+
+        // Listen for website content changes
+        const unsubscribeContent = onSnapshot(websiteContentRef, (docSnap) => {
+            if (docSnap.exists()) {
+                setWebsiteContent(docSnap.data());
+            } else {
+                console.log("No website content found, using defaults.");
+                setDoc(websiteContentRef, websiteContent, { merge: true }).catch(e => console.error("Error setting default content:", e));
+            }
+        }, (err) => {
+            console.error("Error fetching website content:", err);
+            setError("Failed to load website content.");
+        });
+
+        // Listen for sessions changes
+        const unsubscribeSessions = onSnapshot(sessionsCollectionRef, (snapshot) => {
+            const fetchedSessions = snapshot.docs.map(doc => ({
+                id: doc.id,
+                ...doc.data()
+            }));
+            const sortedSessions = fetchedSessions.sort((a, b) => {
+                const dateA = new Date(`${a.date} ${a.time}`);
+                const dateB = new Date(`${b.date} ${b.time}`);
+                return dateA - dateB;
+            });
+            setSessions(sortedSessions);
+        }, (err) => {
+            console.error("Error fetching sessions:", err);
+            setError("Failed to load upcoming sessions.");
+        });
+
+        // Listen for quizzes changes
+        const unsubscribeQuizzes = onSnapshot(quizzesCollectionRef, (snapshot) => {
+            const fetchedQuizzes = snapshot.docs.map(doc => ({
+                id: doc.id,
+                ...doc.data()
+            }));
+            setQuizzes(fetchedQuizzes);
+        }, (err) => {
+            console.error("Error fetching quizzes:", err);
+            setError("Failed to load quizzes.");
+        });
+
+
+        return () => {
+            unsubscribeContent();
+            unsubscribeSessions();
+            unsubscribeQuizzes();
+        };
+    }, [isAuthReady, db]);
+
+    // Combined Login Success Handler
+    const handleLoginSuccess = (type) => {
+        if (type === 'admin') {
+            setIsAdminLoggedIn(true);
+            setCurrentPage('adminDashboard');
+        } else if (type === 'resident') {
+            // onAuthStateChanged will handle setting user and userId for Firebase-authenticated users
+            setCurrentPage('home');
+        }
+    };
+
+    const handleLogout = async () => {
+        setError(null);
+        try {
+            if (isAdminLoggedIn) {
+                setIsAdminLoggedIn(false); // Clear hardcoded admin session
+            }
+            if (auth.currentUser && !auth.currentUser.isAnonymous) {
+                await signOut(auth); // Sign out Firebase user if not anonymous
+            }
+            setCurrentPage('home');
+        } catch (err) {
+            console.error("Logout error:", err);
+            setError("Logout failed.");
+        }
+    };
+
+    // Resident Authentication Functions
+    const handleResidentSignUp = async (name, email, phoneNumber, speciality, collegeName, yearOfAdmission, password) => {
+        setLoading(true);
+        setError(null);
+        try {
+            const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+            const residentUid = userCredential.user.uid;
+            const residentProfileRef = doc(db, `artifacts/${appId}/users/${residentUid}/profile`, 'residentProfile');
+            await setDoc(residentProfileRef, {
+                name,
+                email,
+                phoneNumber,
+                speciality,
+                collegeName,
+                yearOfAdmission,
+                createdAt: new Date().toISOString()
+            });
+            setCurrentPage('profileSetup'); // Redirect to profile setup after successful signup
+        } catch (err) {
+            console.error("Resident signup error:", err);
+            setError(err.message);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    // Profile Management Functions
+    const updateResidentProfile = async (profileData) => {
+        setLoading(true);
+        setError(null);
+        try {
+            if (user && user.uid) {
+                const residentProfileRef = doc(db, `artifacts/${appId}/users/${user.uid}/profile`, 'residentProfile');
+                await updateDoc(residentProfileRef, profileData);
+                alert("Profile updated successfully!");
+            } else {
+                setError("No authenticated user to update profile.");
+            }
+        } catch (err) {
+            console.error("Error updating resident profile:", err);
+            setError("Failed to update profile.");
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    // Session Management Functions
+    const addOrUpdateSession = async (sessionData) => {
+        setLoading(true);
+        setError(null);
+        try {
+            const sessionsCollectionRef = collection(db, `artifacts/${appId}/public/data/sessions`);
+            if (sessionData.id) {
+                const sessionRef = doc(db, sessionsCollectionRef.id, sessionData.id);
+                await updateDoc(sessionRef, {
+                    title: sessionData.title,
+                    presenter: sessionData.presenter, // This is still email for leaderboard
+                    presenterName: sessionData.presenterName, // New field for display
+                    presenterCollege: sessionData.presenterCollege, // New field for display
+                    date: sessionData.date,
+                    time: sessionData.time,
+                    meetingLink: sessionData.meetingLink, // New field
+                    approved: sessionData.approved !== undefined ? sessionData.approved : false,
+                });
+            } else {
+                await addDoc(sessionsCollectionRef, {
+                    title: sessionData.title,
+                    presenter: sessionData.presenter, // This is still email for leaderboard
+                    presenterName: sessionData.presenterName, // New field for display
+                    presenterCollege: sessionData.presenterCollege, // New field for display
+                    date: sessionData.date,
+                    time: sessionData.time,
+                    meetingLink: sessionData.meetingLink, // New field
+                    approved: false,
+                });
+            }
+        } catch (err) {
+            console.error("Error adding/updating session:", err);
+            setError("Failed to save session.");
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const deleteSession = async (sessionId) => {
+        setLoading(true);
+        setError(null);
+        try {
+            const sessionsCollectionRef = collection(db, `artifacts/${appId}/public/data/sessions`);
+            const sessionRef = doc(db, sessionsCollectionRef.id, sessionId);
+            await deleteDoc(sessionRef);
+        } catch (err) {
+            console.error("Error deleting session:", err);
+            setError("Failed to delete session.");
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const updateSessionApproval = async (sessionId, isApproved) => {
+        setLoading(true);
+        setError(null);
+        try {
+            const sessionsCollectionRef = collection(db, `artifacts/${appId}/public/data/sessions`);
+            const sessionRef = doc(db, sessionsCollectionRef.id, sessionId);
+            await updateDoc(sessionRef, { approved: isApproved });
+        } catch (err) {
+            console.error("Error updating session approval:", err);
+            setError("Failed to update session approval status.");
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    // Website Content Management
+    const updateWebsiteSettings = async (settings) => {
+        setLoading(true);
+        setError(null);
+        try {
+            const websiteContentRef = doc(db, `artifacts/${appId}/public/data/websiteContent`, 'mainContent');
+            await setDoc(websiteContentRef, settings, { merge: true });
+            setWebsiteContent(settings);
+        } catch (err) {
+            console.error("Error updating website settings:", err);
+            setError("Failed to update website settings.");
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    // Quiz Management Functions
+    const addOrUpdateQuiz = async (quizData) => {
+        setLoading(true);
+        setError(null);
+        try {
+            const quizzesCollectionRef = collection(db, `artifacts/${appId}/public/data/quizzes`);
+            if (quizData.id) {
+                const quizRef = doc(db, quizzesCollectionRef.id, quizData.id);
+                await updateDoc(quizRef, {
+                    title: quizData.title,
+                    questions: quizData.questions,
+                    duration: quizData.duration // in minutes
+                });
+            } else {
+                await addDoc(quizzesCollectionRef, {
+                    title: quizData.title,
+                    questions: quizData.questions,
+                    duration: quizData.duration // in minutes
+                });
+            }
+        } catch (err) {
+            console.error("Error adding/updating quiz:", err);
+            setError("Failed to save quiz.");
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const deleteQuiz = async (quizId) => {
+        setLoading(true);
+        setError(null);
+        try {
+            const quizzesCollectionRef = collection(db, `artifacts/${appId}/public/data/quizzes`);
+            const quizRef = doc(db, quizzesCollectionRef.id, quizId);
+            await deleteDoc(quizRef);
+        } catch (err) {
+            console.error("Error deleting quiz:", err);
+            setError("Failed to delete quiz.");
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const startQuiz = (quiz) => {
+        if (!user || user.isAnonymous) {
+            setError("Please log in as a resident to take a quiz.");
+            return;
+        }
+        setSelectedQuiz(quiz);
+        setQuizResults(null); // Clear previous results
+        setCurrentPage('quizPage');
+    };
+
+    const submitQuizResults = async (quizId, participantId, answers, score, totalQuestions, durationTaken) => {
+        setLoading(true);
+        setError(null);
+        try {
+            const submissionsCollectionRef = collection(db, `artifacts/${appId}/public/data/quizSubmissions`);
+            await addDoc(submissionsCollectionRef, {
+                quizId,
+                participantId,
+                answers,
+                score,
+                totalQuestions,
+                durationTaken,
+                timestamp: new Date().toISOString()
+            });
+            setQuizResults({ score, totalQuestions, answers, quizId }); // Store results to display
+            setCurrentPage('quizResults');
+        } catch (err) {
+            console.error("Error submitting quiz results:", err);
+            setError("Failed to submit quiz results.");
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    // Form Submission Handlers (to hypothetical Google Sheets endpoints)
+    const handleRegisterForSession = async (formData) => {
+        setLoading(true);
+        setError(null);
+        try {
+            // In a real application, replace this with your Google Apps Script Web App URL
+            const response = await fetch('YOUR_GOOGLE_SHEETS_REGISTRATION_WEB_APP_URL', {
+                method: 'POST',
+                mode: 'no-cors', // Required for Google Apps Script if not handling CORS explicitly
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    timestamp: new Date().toISOString(),
+                    ...formData
+                }),
+            });
+            // For no-cors, response.ok will always be true, so rely on the script's success logic
+            console.log("Registration form submitted (check Google Apps Script logs for actual success):", formData);
+            alert("Thank you for registering! We will get back to you soon.");
+            setShowRegistrationModal(false);
+        } catch (err) {
+            console.error("Error submitting registration form:", err);
+            setError("Failed to submit registration. Please try again.");
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const handlePresentCase = async (formData) => {
+        setLoading(true);
+        setError(null);
+        try {
+            // In a real application, replace this with your Google Apps Script Web App URL
+            const response = await fetch('YOUR_GOOGLE_SHEETS_CASE_PRESENTATION_WEB_APP_URL', {
+                method: 'POST',
+                mode: 'no-cors', // Required for Google Apps Script if not handling CORS explicitly
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    timestamp: new Date().toISOString(),
+                    ...formData
+                }),
+            });
+            console.log("Case presentation form submitted (check Google Apps Script logs for actual success):", formData);
+            alert("Thank you for your submission! We will review your case and get back to you.");
+            setShowCasePresentationModal(false);
+        } catch (err) {
+            console.error("Error submitting case presentation form:", err);
+            setError("Failed to submit case presentation. Please try again.");
+        } finally {
+            setLoading(false);
+        }
+    };
+
+
+    if (loading && !isAuthReady) {
+        return (
+            <div className="min-h-screen flex items-center justify-center bg-gray-100">
+                <p className="text-xl text-gray-700">Loading website...</p>
+            </div>
+        );
+    }
+
+    return (
+        <div className="min-h-screen bg-gray-100 text-slate-800 font-inter">
+            {/* Navigation Bar */}
+            <nav className="bg-slate-900 text-white p-4 shadow-md rounded-b-lg">
+                <div className="container mx-auto flex justify-between items-center">
+                    {/* Marrow Logo - Placeholder */}
+                    <div className="flex items-center">
+                        <img
+                            src="https://placehold.co/40x40/ffffff/000000?text=ML"
+                            alt="Marrow Logo"
+                            className="h-10 w-10 rounded-full mr-4"
+                            onError={(e) => { e.target.onerror = null; e.target.src = "https://placehold.co/40x40/cccccc/000000?text=Error"; }}
+                        />
+                        <h1 className="text-2xl font-bold">Medical Rounds Live</h1>
+                    </div>
+                    <div className="space-x-4">
+                        <button onClick={() => setCurrentPage('home')} className="hover:text-blue-300 transition duration-200">Home</button>
+
+                        {!user && !isAdminLoggedIn ? ( // Not logged in as any user
+                            <>
+                                <button onClick={() => setCurrentPage('residentSignUp')} className="hover:text-blue-300 transition duration-200">Sign Up (Resident)</button>
+                                <button onClick={() => setCurrentPage('login')} className="hover:text-blue-300 transition duration-200">Login</button>
+                            </>
+                        ) : (
+                            <>
+                                {user && !user.isAnonymous && ( // Logged in as a resident
+                                    <>
+                                        <span className="text-gray-300 text-sm">Welcome, Resident!</span>
+                                        <button onClick={() => setCurrentPage('profileSetup')} className="hover:text-blue-300 transition duration-200">Profile</button>
+                                    </>
+                                )}
+                                {isAdminLoggedIn && ( // Logged in as admin
+                                    <>
+                                        <span className="text-gray-300 text-sm">Welcome, Admin!</span>
+                                        <button onClick={() => setCurrentPage('adminDashboard')} className="hover:text-blue-300 transition duration-200">Admin Dashboard</button>
+                                    </>
+                                )}
+                                <button onClick={handleLogout} className="bg-red-600 hover:bg-red-700 text-white py-1 px-4 rounded-full transition duration-200">Logout</button>
+                            </>
+                        )}
+                    </div>
+                </div>
+            </nav>
+
+            {error && (
+                <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mx-auto mt-4 max-w-xl" role="alert">
+                    <strong className="font-bold">Error!</strong>
+                    <span className="block sm:inline"> {error}</span>
+                    <span className="absolute top-0 bottom-0 right-0 px-4 py-3" onClick={() => setError(null)}>
+                        <svg className="fill-current h-6 w-6 text-red-500" role="button" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><title>Close</title><path d="M14.348 14.849a1.2 1.2 0 0 1-1.697 0L10 11.103l-2.651 3.746a1.2 1.2 0 1 1-1.697-1.697l3.746-2.651-3.746-2.651a1.2 1.2 0 1 1 1.697-1.697L10 8.897l2.651-3.746a1.2 1.2 0 1 1 1.697 1.697L11.103 10l3.746 2.651a1.2 1.2 0 0 1 0 1.698z"/></svg>
+                    </span>
+                </div>
+            )}
+
+            {currentPage === 'home' && (
+                <HomePage
+                    websiteContent={websiteContent}
+                    sessions={sessions}
+                    quizzes={quizzes}
+                    onStartQuiz={startQuiz}
+                    onRegisterForSession={() => setShowRegistrationModal(true)}
+                    onPresentCase={() => setShowCasePresentationModal(true)}
+                    currentUserEmail={user?.email} // Pass current user's email for ranking
+                />
+            )}
+
+            {currentPage === 'residentSignUp' && (
+                <ResidentSignUpPage onSignUp={handleResidentSignUp} loading={loading} />
+            )}
+
+            {currentPage === 'login' && (
+                <UnifiedLoginPage
+                    onLoginSuccess={handleLoginSuccess}
+                    loading={loading}
+                    firebaseAuth={auth}
+                    onError={setError}
+                />
+            )}
+
+            {currentPage === 'profileSetup' && user && !user.isAnonymous && (
+                <ProfileSetupPage
+                    userId={user.uid}
+                    onUpdateProfile={updateResidentProfile}
+                    onReturnHome={() => setCurrentPage('home')}
+                    loading={loading}
+                    onError={setError}
+                />
+            )}
+
+            {currentPage === 'adminDashboard' && isAdminLoggedIn && (
+                <AdminDashboard
+                    userId={userId}
+                    sessions={sessions}
+                    quizzes={quizzes}
+                    websiteContent={websiteContent}
+                    onAddOrUpdateSession={addOrUpdateSession}
+                    onDeleteSession={deleteSession}
+                    onUpdateSessionApproval={updateSessionApproval}
+                    onAddOrUpdateQuiz={addOrUpdateQuiz}
+                    onDeleteQuiz={deleteQuiz}
+                    onUpdateWebsiteSettings={updateWebsiteSettings}
+                    loading={loading}
+                />
+            )}
+
+            {currentPage === 'quizPage' && selectedQuiz && (
+                <QuizPage
+                    quiz={selectedQuiz}
+                    participantId={user ? user.uid : 'anonymous'} // Use Firebase UID for resident
+                    onSubmitResults={submitQuizResults}
+                    onQuizEnd={() => setCurrentPage('home')} // Go home if quiz ends without submission
+                    loading={loading}
+                />
+            )}
+
+            {currentPage === 'quizResults' && quizResults && (
+                <QuizResultsPage
+                    quizResults={quizResults}
+                    quizzes={quizzes} // Pass quizzes to get original quiz data
+                    onReturnHome={() => setCurrentPage('home')}
+                />
+            )}
+
+            {showRegistrationModal && (
+                <Modal onClose={() => setShowRegistrationModal(false)}>
+                    <RegistrationForm onSubmit={handleRegisterForSession} loading={loading} />
+                </Modal>
+            )}
+
+            {showCasePresentationModal && (
+                <Modal onClose={() => setShowCasePresentationModal(false)}>
+                    <CasePresentationForm onSubmit={handlePresentCase} loading={loading} />
+                </Modal>
+            )}
+        </div>
+    );
+};
+
+// Modal Component
+const Modal = ({ children, onClose }) => {
+    return (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-75 flex items-center justify-center p-4 z-50">
+            <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-lg relative">
+                <button
+                    onClick={onClose}
+                    className="absolute top-3 right-3 text-gray-500 hover:text-gray-700 text-2xl font-bold"
+                >
+                    &times;
+                </button>
+                {children}
+            </div>
+        </div>
+    );
+};
+
+// Registration Form Component
+const RegistrationForm = ({ onSubmit, loading }) => {
+    const [formData, setFormData] = useState({
+        name: '',
+        email: '',
+        phoneNumber: '',
+        institution: '',
+        speciality: '',
+        yearOfAdmission: '',
+        isMarrowUser: false,
+    });
+
+    const handleChange = (e) => {
+        const { name, value, type, checked } = e.target;
+        setFormData(prev => ({
+            ...prev,
+            [name]: type === 'checkbox' ? checked : value
+        }));
+    };
+
+    const handleSubmit = (e) => {
+        e.preventDefault();
+        onSubmit(formData);
+    };
+
+    return (
+        <form onSubmit={handleSubmit} className="space-y-4">
+            <h2 className="text-2xl font-bold text-center mb-6 text-slate-900">Register for Next Session</h2>
+            <div>
+                <label htmlFor="regName" className="block text-gray-700 text-sm font-bold mb-2">Name:</label>
+                <input type="text" id="regName" name="name" value={formData.name} onChange={handleChange} required
+                       className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            </div>
+            <div>
+                <label htmlFor="regEmail" className="block text-gray-700 text-sm font-bold mb-2">Email:</label>
+                <input type="email" id="regEmail" name="email" value={formData.email} onChange={handleChange} required
+                       className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            </div>
+            <div>
+                <label htmlFor="regPhone" className="block text-gray-700 text-sm font-bold mb-2">Phone Number:</label>
+                <input type="tel" id="regPhone" name="phoneNumber" value={formData.phoneNumber} onChange={handleChange} required
+                       className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            </div>
+            <div>
+                <label htmlFor="regSpeciality" className="block text-gray-700 text-sm font-bold mb-2">Speciality:</label>
+                <input type="text" id="regSpeciality" name="speciality" value={formData.speciality} onChange={handleChange} required
+                       className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            </div>
+            <div>
+                <label htmlFor="regCollegeName" className="block text-gray-700 text-sm font-bold mb-2">College Name:</label>
+                <input type="text" id="regCollegeName" name="collegeName" value={formData.collegeName} onChange={handleChange} required
+                       className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            </div>
+            <div>
+                <label htmlFor="regYearAdmission" className="block text-gray-700 text-sm font-bold mb-2">Year of Admission:</label>
+                <input type="number" id="regYearAdmission" name="yearOfAdmission" value={formData.yearOfAdmission} onChange={handleChange} required
+                       className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            </div>
+            <div className="flex items-center">
+                <input type="checkbox" id="regMarrowUser" name="isMarrowUser" checked={formData.isMarrowUser} onChange={handleChange}
+                       className="mr-2 h-4 w-4 text-blue-600 focus:ring-blue-500 rounded" />
+                <label htmlFor="regMarrowUser" className="text-gray-700 text-sm">Are you a Marrow SS/Residency Pro user?</label>
+            </div>
+            <button
+                type="submit"
+                className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-full transition duration-300 ease-in-out transform hover:scale-105"
+                disabled={loading}
+            >
+                {loading ? 'Submitting...' : 'Submit Registration'}
+            </button>
+        </form>
+    );
+};
+
+// Case Presentation Form Component
+const CasePresentationForm = ({ onSubmit, loading }) => {
+    const [formData, setFormData] = useState({
+        name: '',
+        phoneNumber: '',
+        email: '',
+        college: '',
+        speciality: '',
+        topicName: '',
+        preferredDate: '',
+        preferredTime: '',
+        yearOfAdmission: '',
+    });
+
+    const handleChange = (e) => {
+        const { name, value } = e.target;
+        setFormData(prev => ({
+            ...prev,
+            [name]: value
+        }));
+    };
+
+    const handleSubmit = (e) => {
+        e.preventDefault();
+        onSubmit(formData);
+    };
+
+    return (
+        <form onSubmit={handleSubmit} className="space-y-4">
+            <h2 className="text-2xl font-bold text-center mb-6 text-slate-900">Present a Case</h2>
+            <div>
+                <label htmlFor="caseName" className="block text-gray-700 text-sm font-bold mb-2">Name:</label>
+                <input type="text" id="caseName" name="name" value={formData.name} onChange={handleChange} required
+                       className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            </div>
+            <div>
+                <label htmlFor="casePhone" className="block text-gray-700 text-sm font-bold mb-2">Phone Number:</label>
+                <input type="tel" id="casePhone" name="phoneNumber" value={formData.phoneNumber} onChange={handleChange} required
+                       className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            </div>
+            <div>
+                <label htmlFor="caseEmail" className="block text-gray-700 text-sm font-bold mb-2">Email:</label>
+                <input type="email" id="caseEmail" name="email" value={formData.email} onChange={handleChange} required
+                       className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            </div>
+            <div>
+                <label htmlFor="caseCollege" className="block text-gray-700 text-sm font-bold mb-2">College:</label>
+                <input type="text" id="caseCollege" name="college" value={formData.college} onChange={handleChange} required
+                       className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            </div>
+            <div>
+                <label htmlFor="caseSpeciality" className="block text-gray-700 text-sm font-bold mb-2">Speciality:</label>
+                <input type="text" id="caseSpeciality" name="speciality" value={formData.speciality} onChange={handleChange} required
+                       className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            </div>
+            <div>
+                <label htmlFor="caseTopic" className="block text-gray-700 text-sm font-bold mb-2">Topic Name:</label>
+                <input type="text" id="caseTopic" name="topicName" value={formData.topicName} onChange={handleChange} required
+                       className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+                <div>
+                    <label htmlFor="casePreferredDate" className="block text-gray-700 text-sm font-bold mb-2">Preferred Date:</label>
+                    <input type="date" id="casePreferredDate" name="preferredDate" value={formData.preferredDate} onChange={handleChange} required
+                           className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                </div>
+                <div>
+                    <label htmlFor="casePreferredTime" className="block text-gray-700 text-sm font-bold mb-2">Preferred Time:</label>
+                    <input type="time" id="casePreferredTime" name="preferredTime" value={formData.preferredTime} onChange={handleChange} required
+                           className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                </div>
+            </div>
+            <div>
+                <label htmlFor="caseYearAdmission" className="block text-gray-700 text-sm font-bold mb-2">Year of Admission:</label>
+                <input type="number" id="caseYearAdmission" name="yearOfAdmission" value={formData.yearOfAdmission} onChange={handleChange} required
+                       className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            </div>
+            <button
+                type="submit"
+                className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-full transition duration-300 ease-in-out transform hover:scale-105"
+                disabled={loading}
+            >
+                {loading ? 'Submitting...' : 'Submit Case'}
+            </button>
+        </form>
+    );
+};
+
+// Home Page Component
+const HomePage = ({ websiteContent, sessions, quizzes, onStartQuiz, onRegisterForSession, onPresentCase, currentUserEmail }) => {
+    const [selectedDate, setSelectedDate] = useState(new Date().toISOString().slice(0, 10)); //ISO 8601 format
+
+    // Filter sessions to get the next 3 upcoming and past 2 events
+    const getFeaturedSessions = useCallback(() => {
+        const now = new Date();
+        const approvedSessions = sessions.filter(session => session.approved);
+
+        const upcoming = [];
+        const past = [];
+
+        // Sort all approved sessions by date and time
+        const sortedSessions = [...approvedSessions].sort((a, b) => {
+            const dateTimeA = new Date(`${a.date}T${a.time}`);
+            const dateTimeB = new Date(`${b.date}T${b.time}`);
+            return dateTimeA.getTime() - dateTimeB.getTime();
+        });
+
+        sortedSessions.forEach(session => {
+            const sessionDateTime = new Date(`${session.date}T${session.time}`);
+            if (sessionDateTime > now) {
+                upcoming.push(session);
+            } else {
+                past.push(session);
+            }
+        });
+
+        // Get the next 3 upcoming sessions
+        const next3Upcoming = upcoming.slice(0, 3);
+
+        // Get the last 2 past sessions (most recent first)
+        const last2Past = past.reverse().slice(0, 2);
+
+        return { next3Upcoming, last2Past };
+    }, [sessions]);
+
+    const { next3Upcoming, last2Past } = getFeaturedSessions();
+
+
+    // Filter sessions to only show approved ones for the selected date for the calendar
+    const filteredSessionsForCalendar = sessions.filter(session =>
+        session.approved && session.date === selectedDate
+    );
+
+    // Generate 30 days for the calendar
+    const getCalendarDays = () => {
+        const days = [];
+        const today = new Date();
+        for (let i = 0; i < 30; i++) {
+            const date = new Date(today);
+            date.setDate(today.getDate() + i);
+            days.push(date);
+        }
+        return days;
+    };
+
+    const calendarDays = getCalendarDays();
+
+    return (
+        <>
+            {/* Hero Section */}
+            <section className="bg-gradient-to-r from-blue-600 to-indigo-700 text-white py-20 px-4 sm:px-6 lg:px-8 rounded-b-lg shadow-lg">
+                <div className="container mx-auto text-center">
+                    <h1 className="text-4xl sm:text-5xl lg:text-6xl font-extrabold mb-6 leading-tight">
+                        {websiteContent.heroTitle}
+                    </h1>
+                    <p className="text-lg sm:text-xl mb-10 max-w-3xl mx-auto opacity-90">
+                        {websiteContent.heroSubtitle}
+                    </p>
+                    <div className="flex flex-col sm:flex-row justify-center space-y-4 sm:space-y-0 sm:space-x-6">
+                        <button
+                            onClick={onRegisterForSession}
+                            className="bg-white text-blue-700 font-bold py-3 px-8 rounded-full shadow-lg hover:bg-gray-100 transition duration-300 ease-in-out transform hover:scale-105"
+                        >
+                            Register for Next Session
+                        </button>
+                        <button
+                            onClick={onPresentCase}
+                            className="bg-transparent border-2 border-white text-white font-bold py-3 px-8 rounded-full hover:bg-white hover:text-blue-700 transition duration-300 ease-in-out transform hover:scale-105"
+                        >
+                            Present a Case
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+            {/* "How it works" Section */}
+            <section className="py-16 px-4 sm:px-6 lg:px-8 bg-white">
+                <div className="container mx-auto">
+                    <h2 className="text-3xl sm:text-4xl font-bold text-center mb-12 text-slate-900">How It Works</h2>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-10">
+                        <div className="flex flex-col items-center text-center p-6 bg-blue-50 rounded-xl shadow-md transform hover:scale-105 transition duration-300">
+                            <div className="bg-blue-600 text-white rounded-full w-12 h-12 flex items-center justify-center text-xl font-bold mb-4">1</div>
+                            <h3 className="text-xl font-semibold mb-3 text-slate-800">Case Presentation</h3>
+                            <p className="text-slate-600">A presenter shares a real-world clinical case.</p>
+                        </div>
+                        <div className="flex flex-col items-center text-center p-6 bg-indigo-50 rounded-xl shadow-md transform hover:scale-105 transition duration-300">
+                            <div className="bg-indigo-600 text-white rounded-full w-12 h-12 flex items-center justify-center text-xl font-bold mb-4">2</div>
+                            <h3 className="text-xl font-semibold mb-3 text-slate-800">Q&A Session</h3>
+                            <p className="text-slate-600">Engage in a live question and answer session with the presenter and experts.</p>
+                        </div>
+                        <div className="flex flex-col items-center text-center p-6 bg-purple-50 rounded-xl shadow-md transform hover:scale-105 transition duration-300">
+                            <div className="bg-purple-600 text-white rounded-full w-12 h-12 flex items-center justify-center text-xl font-bold mb-4">3</div>
+                            <h3 className="text-xl font-semibold mb-3 text-slate-800">Follow-up Quiz</h3>
+                            <p className="text-slate-600">Test your knowledge with a short quiz based on the session's content.</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            {/* Featured Sessions Section: Next 3 Upcoming & Last 2 Past */}
+            <section className="py-16 px-4 sm:px-6 lg:px-8 bg-gray-100">
+                <div className="container mx-auto">
+                    <h2 className="text-3xl sm:text-4xl font-bold text-center mb-12 text-slate-900">Featured Sessions</h2>
+
+                    {next3Upcoming.length > 0 && (
+                        <>
+                            <h3 className="text-2xl font-semibold text-center mb-6 text-slate-800">Next 3 Upcoming Sessions</h3>
+                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8 mb-12">
+                                {next3Upcoming.map(session => (
+                                    <SessionCard key={session.id} session={session} type="upcoming" />
+                                ))}
+                            </div>
+                        </>
+                    )}
+
+                    {last2Past.length > 0 && (
+                        <>
+                            <h3 className="text-2xl font-semibold text-center mb-6 text-slate-800">Last 2 Past Sessions</h3>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                                {last2Past.map(session => (
+                                    <SessionCard key={session.id} session={session} type="past" />
+                                ))}
+                            </div>
+                        </>
+                    )}
+
+                    {next3Upcoming.length === 0 && last2Past.length === 0 && (
+                        <p className="text-center text-gray-600">No featured sessions available yet.</p>
+                    )}
+                </div>
+            </section>
+
+
+            {/* Upcoming Sessions Section with Calendar */}
+            <section className="py-16 px-4 sm:px-6 lg:px-8 bg-gray-50">
+                <div className="container mx-auto">
+                    <h2 className="text-3xl sm:text-4xl font-bold text-center mb-12 text-slate-900">All Upcoming Sessions by Date</h2>
+
+                    {/* Calendar Navigation */}
+                    <div className="bg-white p-6 rounded-lg shadow-lg mb-8 border border-gray-200">
+                        <h3 className="text-xl font-semibold text-center mb-4 text-slate-800">Select a Date to View Sessions</h3>
+                        <div className="grid grid-cols-7 gap-2 text-center text-sm mb-4">
+                            {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(day => (
+                                <div key={day} className="font-bold text-gray-600">{day}</div>
+                            ))}
+                        </div>
+                        <div className="grid grid-cols-7 gap-2 text-center">
+                            {calendarDays.map(dateObj => {
+                                const dateString = dateObj.toISOString().slice(0, 10);
+                                const isSelected = dateString === selectedDate;
+                                const hasEvents = sessions.some(session => session.approved && session.date === dateString);
+
+                                return (
+                                    <button
+                                        key={dateString}
+                                        onClick={() => setSelectedDate(dateString)}
+                                        className={`p-2 rounded-lg transition duration-200 ease-in-out
+                                            ${isSelected ? 'bg-blue-600 text-white shadow-md transform scale-105' : 'bg-gray-100 text-gray-800 hover:bg-blue-200'}
+                                            ${hasEvents && !isSelected ? 'border-2 border-blue-400' : ''}
+                                        `}
+                                    >
+                                        <span className="block text-xs text-gray-500">{dateObj.toLocaleString('en-us', { month: 'short' })}</span>
+                                        <span className="block text-lg font-bold">{dateObj.getDate()}</span>
+                                    </button>
+                                );
+                            })}
+                        </div>
+                        <p className="text-center text-sm text-gray-600 mt-4">
+                            <span className="inline-block w-3 h-3 rounded-full border-2 border-blue-400 mr-2"></span> Dates with events
+                        </p>
+                    </div>
+
+                    {/* Sessions List for Selected Date */}
+                    <h3 className="text-2xl font-semibold text-center mb-6 text-slate-900">
+                        Sessions for {new Date(selectedDate).toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
+                    </h3>
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+                        {filteredSessionsForCalendar.length > 0 ? (
+                            filteredSessionsForCalendar.map(session => (
+                                <div key={session.id} className="bg-white rounded-xl shadow-lg p-6 border border-gray-200 hover:shadow-xl transition duration-300">
+                                    <h3 className="text-xl font-semibold mb-2 text-blue-700">{session.title}</h3>
+                                    <p className="text-gray-600 mb-4">Presented by: {session.presenterName || session.presenter || 'N/A'}</p>
+                                    <p className="text-gray-700 mb-4">Date: {session.date}</p>
+                                    <p className="text-700 mb-4">Time: {session.time}</p>
+                                    {session.meetingLink && (
+                                        <a href={session.meetingLink} target="_blank" rel="noopener noreferrer"
+                                            className="w-full bg-blue-600 text-white py-2 px-4 rounded-lg hover:bg-blue-700 transition duration-300 text-center block">
+                                            Join Session
+                                        </a>
+                                    )}
+                                    {!session.meetingLink && (
+                                        <button className="w-full bg-gray-400 text-white py-2 px-4 rounded-lg cursor-not-allowed">Link Not Available</button>
+                                    )}
+                                </div>
+                            ))
+                        ) : (
+                            <p className="col-span-full text-center text-gray-600">No sessions scheduled for this date.</p>
+                        )}
+                    </div>
+                </div>
+            </section>
+
+            {/* Top Presenters Leaderboard Section */}
+            <Leaderboard sessions={sessions} currentUserEmail={currentUserEmail} />
+
+            {/* Quiz Section */}
+            <section className="py-16 px-4 sm:px-6 lg:px-8 bg-gray-100">
+                <div className="container mx-auto">
+                    <h2 className="text-3xl sm:text-4xl font-bold text-center mb-12 text-slate-900">Available Quizzes</h2>
+                    {quizzes.length === 0 ? (
+                        <p className="text-center text-gray-600">No quizzes available yet. Check back soon!</p>
+                    ) : (
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+                            {quizzes.map(quiz => (
+                                <div key={quiz.id} className="bg-white rounded-xl shadow-lg p-6 border border-gray-200 hover:shadow-xl transition duration-300">
+                                    <h3 className="text-xl font-semibold mb-2 text-purple-700">{quiz.title}</h3>
+                                    <p className="text-gray-600 mb-2">Questions: {quiz.questions.length}</p>
+                                    <p className="text-gray-600 mb-4">Duration: {quiz.duration} minutes</p>
+                                    <button
+                                        onClick={() => onStartQuiz(quiz)}
+                                        className="w-full bg-purple-600 text-white py-2 px-4 rounded-lg hover:bg-purple-700 transition duration-300"
+                                    >
+                                        Start Quiz
+                                    </button>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            </section>
+
+            {/* YouTube Replay Embed Slot */}
+            <section className="py-16 px-4 sm:px-6 lg:px-8 bg-white">
+                <div className="container mx-auto text-center">
+                    <h2 className="text-3xl sm:text-4xl font-bold mb-12 text-slate-900">Previous Session Replay</h2>
+                    <div className="aspect-w-16 aspect-h-9 max-w-4xl mx-auto rounded-xl shadow-xl overflow-hidden">
+                        <iframe
+                            className="w-full h-full"
+                            src={websiteContent.youtubeLink}
+                            title="YouTube video player"
+                            frameBorder="0"
+                            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                            allowFullScreen>
+                        </iframe>
+                    </div>
+                    <p className="mt-8 text-lg text-gray-700">Missed a session? Catch up on our latest replays here!</p>
+                </div>
+            </section>
+
+            {/* Community Join Links */}
+            <section className="bg-blue-100 py-16 px-4 sm:px-6 lg:px-8 rounded-t-lg shadow-inner">
+                <div className="container mx-auto text-center">
+                    <h2 className="text-3xl sm:text-4xl font-bold mb-6 text-blue-800">Join Our Community!</h2>
+                    <p className="text-lg mb-8 text-blue-700 max-w-2xl mx-auto">
+                        Connect with fellow medical professionals, share insights, and stay updated on upcoming sessions.
+                    </p>
+                    <div className="flex flex-col sm:flex-row justify-center space-y-4 sm:space-y-0 sm:space-x-6">
+                        <a href={websiteContent.telegramLink} target="_blank" rel="noopener noreferrer"
+                           className="inline-flex items-center bg-blue-600 text-white font-bold py-3 px-8 rounded-full shadow-lg hover:bg-blue-700 transition duration-300 ease-in-out transform hover:scale-105">
+                            <svg className="w-6 h-6 mr-3" fill="currentColor" viewBox="0 0 24 24">
+                                <path d="M18.364 5.636a9 9 0 100 12.728 9 9 0 000-12.728zM12 2C6.477 2 2 6.477 2 12s4.477 10 10 10 10-4.477 10-10S17.523 2 12 2zm4.392 7.138L9.043 14.54a.75.75 0 01-1.077-.991l6.35-5.91a.75.75 0 011.077.991zM11.608 14.862l-2.5-2.5a.75 0 011.06-1.06l2.5 2.5a.75 0 01-1.06 1.06z"/>
+                                <path d="M16.92 7.08a.75.75 0 00-1.06 0L9.04 13.9a.75.75 0 001.06 1.06l6.82-6.82a.75.75 0 000-1.06z"/>
+                            </svg>
+                            Join Telegram Group
+                        </a>
+                        <a href={websiteContent.whatsappLink} target="_blank" rel="noopener noreferrer"
+                           className="inline-flex items-center bg-green-600 text-white font-bold py-3 px-8 rounded-full shadow-lg hover:bg-green-700 transition duration-300 ease-in-out transform hover:scale-105">
+                            <svg className="w-6 h-6 mr-3" fill="currentColor" viewBox="0 0 24 24">
+                                <path d="M12.04 2C6.53 2 2 6.53 2 12.04c0 1.5.41 2.92 1.19 4.17L2 22l5.96-1.55c1.19.66 2.52 1.03 3.92 1.03 5.51 0 10.04-4.53 10.04-10.04S17.55 2 12.04 2zm4.43 13.91c-.27.7-.99 1.47-1.72 1.55-.73.08-1.5-.18-2.22-.44-.72-.26-1.57-.65-2.43-1.12-.86-.47-1.66-1.08-2.25-1.67-.59-.59-1.08-1.29-1.55-2.15-.47-.86-.86-1.71-1.12-2.43-.26-.72-.52-1.49-.44-2.22.08-.73.85-1.45 1.55-1.72.7-.27 1.47-.26 2.19-.08.72.18 1.35.41 1.94.67.59.26 1.1.55 1.48.83.38.28.69.57.93.85.24.28.43.58.55.88.12.3.18.6.18.91 0 .3-.06.6-.18.91-.12.3-.31.6-.55.88-.24.28-.55.57-.93.85-.38.28-.8.51-1.48.83-.59.26-1.22.49-1.94.67-.72.18-1.49.19-2.19-.08z"/>
+                            </svg>
+                            Join WhatsApp Group
+                        </a>
+                    </div>
+                </div>
+            </section>
+
+            {/* Footer */}
+            <footer className="bg-slate-800 text-white py-8 px-4 sm:px-6 lg:px-8 text-center rounded-t-lg">
+                <div className="container mx-auto">
+                    <p>&copy; 2025 Medical Rounds Live. All rights reserved.</p>
+                    <div className="mt-4 text-sm">
+                        <a href="#" className="text-gray-400 hover:text-white mx-2">Privacy Policy</a>
+                        <span className="text-gray-400">|</span>
+                        <a href="#" className="text-gray-400 hover:text-white mx-2">Terms of Service</a>
+                    </div>
+                </div>
+            </footer >
+        </>
+    );
+};
+
+// Session Card Component
+const SessionCard = ({ session, type }) => {
+    const isUpcoming = type === 'upcoming';
+    const linkText = isUpcoming ? 'Join Session' : 'View Recording';
+    const linkColor = isUpcoming ? 'bg-blue-600 hover:bg-blue-700' : 'bg-purple-600 hover:bg-purple-700';
+
+    return (
+        <div className="bg-white rounded-xl shadow-lg p-6 border border-gray-200 hover:shadow-xl transition duration-300">
+            <h3 className="text-xl font-semibold mb-2 text-slate-800">{session.title}</h3>
+            <p className="text-gray-600 mb-1">Doctor: {session.presenterName || 'N/A'}</p>
+            <p className="text-gray-600 mb-1">College: {session.presenterCollege || 'N/A'}</p>
+            <p className="text-gray-600 mb-4">Time: {session.time} on {session.date}</p>
+            {session.meetingLink ? (
+                <a href={session.meetingLink} target="_blank" rel="noopener noreferrer"
+                   className={`w-full text-white py-2 px-4 rounded-lg transition duration-300 text-center block ${linkColor}`}>
+                    {linkText}
+                </a>
+            ) : (
+                <button className="w-full bg-gray-400 text-white py-2 px-4 rounded-lg cursor-not-allowed">Link Not Available</button>
+            )}
+        </div>
+    );
+};
+
+
+// Unified Login Page Component
+const UnifiedLoginPage = ({ onLoginSuccess, loading, firebaseAuth, onError }) => {
+    const [loginType, setLoginType] = useState('resident'); // 'resident' or 'admin'
+    const [email, setEmail] = useState('');
+    const [password, setPassword] = useState('');
+
+    const handleLoginSubmit = async (e) => {
+        e.preventDefault();
+        onError(null); // Clear previous errors
+
+        if (loginType === 'admin') {
+            // Hardcoded admin credentials
+            const ADMIN_EMAIL = 'aftab@marrowmed.com';
+            const ADMIN_PASSWORD = 'Dailyrounds@123';
+
+            if (email === ADMIN_EMAIL && password === ADMIN_PASSWORD) {
+                onLoginSuccess('admin'); // Notify parent of successful admin login
+            } else {
+                onError("Invalid admin email or password.");
+            }
+        } else { // Resident login
+            try {
+                await firebaseAuth.signInWithEmailAndPassword(email, password);
+                onLoginSuccess('resident'); // Notify parent of successful resident login (Firebase handles user state)
+            } catch (err) {
+                console.error("Resident login error:", err);
+                onError(err.message || "Login failed. Please check your email and password.");
+            }
+        }
+    };
+
+    return (
+        <div className="flex items-center justify-center min-h-[calc(100vh-80px)] bg-gray-50">
+            <div className="bg-white p-8 rounded-lg shadow-xl w-full max-w-md">
+                <h2 className="text-3xl font-bold text-center mb-8 text-slate-900">Login</h2>
+
+                <div className="flex justify-center mb-6 space-x-4">
+                    <button
+                        onClick={() => setLoginType('resident')}
+                        className={`py-2 px-6 rounded-full font-semibold transition duration-300
+                            ${loginType === 'resident' ? 'bg-blue-600 text-white shadow-md' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}
+                        `}
+                    >
+                        Login as Doctor/Resident
+                    </button>
+                    <button
+                        onClick={() => setLoginType('admin')}
+                        className={`py-2 px-6 rounded-full font-semibold transition duration-300
+                            ${loginType === 'admin' ? 'bg-blue-600 text-white shadow-md' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}
+                        `}
+                    >
+                        Login as Admin
+                    </button>
+                </div>
+
+                <form onSubmit={handleLoginSubmit}>
+                    <div className="mb-4">
+                        <label htmlFor="loginEmail" className="block text-gray-700 text-sm font-bold mb-2">
+                            Email:
+                        </label>
+                        <input
+                            type="email"
+                            id="loginEmail"
+                            className="shadow appearance-none border rounded w-full py-3 px-4 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            value={email}
+                            onChange={(e) => setEmail(e.target.value)}
+                            required
+                        />
+                    </div>
+                    <div className="mb-6">
+                        <label htmlFor="loginPassword" className="block text-gray-700 text-sm font-bold mb-2">
+                            Password:
+                        </label>
+                        <input
+                            type="password"
+                            id="loginPassword"
+                            className="shadow appearance-none border rounded w-full py-3 px-4 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            value={password}
+                            onChange={(e) => setPassword(e.target.value)}
+                            required
+                        />
+                    </div>
+                    <div className="flex items-center justify-between">
+                        <button
+                            type="submit"
+                            className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-full focus:outline-none focus:shadow-outline transition duration-300 ease-in-out transform hover:scale-105 w-full"
+                            disabled={loading}
+                        >
+                            {loading ? 'Logging In...' : 'Login'}
+                        </button>
+                    </div>
+                    {loginType === 'admin' && (
+                        <p className="text-center text-sm text-gray-500 mt-4">
+                            (Admin credentials: `aftab@marrowmed.com` / `Dailyrounds@123`)
+                        </p>
+                    )}
+                </form>
+            </div>
+        </div>
+    );
+};
+
+// Profile Setup Page Component
+const ProfileSetupPage = ({ userId, onUpdateProfile, onReturnHome, loading, onError }) => {
+    const [profileData, setProfileData] = useState({
+        name: '',
+        email: '',
+        phoneNumber: '',
+        speciality: '',
+        collegeName: '',
+        yearOfAdmission: '',
+    });
+    const [fetchLoading, setFetchLoading] = useState(true);
+
+    useEffect(() => {
+        const fetchProfile = async () => {
+            if (!userId) return;
+            setFetchLoading(true);
+            try {
+                const profileRef = doc(db, `artifacts/${appId}/users/${userId}/profile`, 'residentProfile');
+                const docSnap = await getDoc(profileRef);
+                if (docSnap.exists()) {
+                    setProfileData(docSnap.data());
+                } else {
+                    onError("Profile not found. Please complete your registration.");
+                }
+            } catch (err) {
+                console.error("Error fetching profile:", err);
+                onError("Failed to load profile data.");
+            } finally {
+                setFetchLoading(false);
+            }
+        };
+        fetchProfile();
+    }, [userId, onError]);
+
+    const handleChange = (e) => {
+        const { name, value } = e.target;
+        setProfileData(prev => ({
+            ...prev,
+            [name]: value
+        }));
+    };
+
+    const handleSubmit = (e) => {
+        e.preventDefault();
+        onUpdateProfile(profileData);
+    };
+
+    if (fetchLoading) {
+        return (
+            <div className="flex items-center justify-center min-h-[calc(100vh-80px)] bg-gray-50">
+                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
+                <p className="ml-3 text-blue-600">Loading profile...</p>
+            </div>
+        );
+    }
+
+    return (
+        <div className="flex items-center justify-center min-h-[calc(100vh-80px)] bg-gray-50 p-4">
+            <div className="bg-white p-8 rounded-lg shadow-xl w-full max-w-md">
+                <h2 className="text-3xl font-bold text-center mb-8 text-slate-900">Your Profile</h2>
+                <form onSubmit={handleSubmit} className="space-y-4">
+                    <div>
+                        <label htmlFor="profileName" className="block text-gray-700 text-sm font-bold mb-2">Name:</label>
+                        <input type="text" id="profileName" name="name" value={profileData.name} onChange={handleChange} required
+                               className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                    </div>
+                    <div>
+                        <label htmlFor="profileEmail" className="block text-gray-700 text-sm font-bold mb-2">Email:</label>
+                        <input type="email" id="profileEmail" name="email" value={profileData.email} onChange={handleChange} required readOnly
+                               className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight bg-gray-100 cursor-not-allowed" />
+                        <p className="text-xs text-gray-500 mt-1">Email cannot be changed.</p>
+                    </div>
+                    <div>
+                        <label htmlFor="profilePhone" className="block text-gray-700 text-sm font-bold mb-2">Phone Number:</label>
+                        <input type="tel" id="profilePhone" name="phoneNumber" value={profileData.phoneNumber} onChange={handleChange} required
+                               className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                    </div>
+                    <div>
+                        <label htmlFor="profileSpeciality" className="block text-gray-700 text-sm font-bold mb-2">Speciality:</label>
+                        <input type="text" id="profileSpeciality" name="speciality" value={profileData.speciality} onChange={handleChange} required
+                               className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                    </div>
+                    <div>
+                        <label htmlFor="profileCollegeName" className="block text-gray-700 text-sm font-bold mb-2">College Name:</label>
+                        <input type="text" id="profileCollegeName" name="collegeName" value={profileData.collegeName} onChange={handleChange} required
+                               className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                    </div>
+                    <div>
+                        <label htmlFor="profileYearAdmission" className="block text-gray-700 text-sm font-bold mb-2">Year of Admission:</label>
+                        <input type="number" id="profileYearAdmission" name="yearOfAdmission" value={profileData.yearOfAdmission} onChange={handleChange} required
+                               className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                    </div>
+                    <button
+                        type="submit"
+                        className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-full transition duration-300 ease-in-out transform hover:scale-105"
+                        disabled={loading}
+                    >
+                        {loading ? 'Saving...' : 'Save Profile'}
+                    </button>
+                    <button
+                        type="button"
+                        onClick={onReturnHome}
+                        className="w-full bg-gray-500 hover:bg-gray-600 text-white font-bold py-2 px-4 rounded-full mt-2 transition duration-300 ease-in-out transform hover:scale-105"
+                    >
+                        Go to Home
+                    </button>
+                </form>
+            </div>
+        </div>
+    );
+};
+
+// Admin Dashboard Component
+const AdminDashboard = ({ userId, sessions, quizzes, websiteContent, onAddOrUpdateSession, onDeleteSession, onUpdateSessionApproval, onAddOrUpdateQuiz, onDeleteQuiz, onUpdateWebsiteSettings, loading }) => {
+    const [newSession, setNewSession] = useState({ id: null, title: '', presenter: '', presenterName: '', presenterCollege: '', date: '', time: '', meetingLink: '', approved: false });
+    const [editSessionId, setEditSessionId] = useState(null);
+    const [websiteSettings, setWebsiteSettings] = useState(websiteContent);
+
+    // Quiz management states
+    const [newQuiz, setNewQuiz] = useState({ id: null, title: '', duration: 10, questions: [{ questionText: '', options: ['', '', '', ''], correctAnswerIndex: 0 }] });
+    const [editQuizId, setEditQuizId] = useState(null);
+
+    useEffect(() => {
+        setWebsiteSettings(websiteContent);
+    }, [websiteContent]);
+
+    // Session handlers
+    const handleSessionSubmit = (e) => {
+        e.preventDefault();
+        onAddOrUpdateSession(newSession);
+        setNewSession({ id: null, title: '', presenter: '', presenterName: '', presenterCollege: '', date: '', time: '', meetingLink: '', approved: false });
+        setEditSessionId(null);
+    };
+
+    const handleEditSessionClick = (session) => {
+        setNewSession(session);
+        setEditSessionId(session.id);
+    };
+
+    // Website settings handlers
+    const handleWebsiteSettingsChange = (e) => {
+        const { name, value } = e.target;
+        setWebsiteSettings(prev => ({ ...prev, [name]: value }));
+    };
+
+    const handleWebsiteSettingsSubmit = (e) => {
+        e.preventDefault();
+        onUpdateWebsiteSettings(websiteSettings);
+    };
+
+    // Quiz handlers
+    const handleAddQuestion = () => {
+        setNewQuiz(prev => ({
+            ...prev,
+            questions: [...prev.questions, { questionText: '', options: ['', '', '', ''], correctAnswerIndex: 0 }]
+        }));
+    };
+
+    const handleQuestionChange = (index, field, value) => {
+        const updatedQuestions = newQuiz.questions.map((q, i) => {
+            if (i === index) {
+                return { ...q, [field]: value };
+            }
+            return q;
+        });
+        setNewQuiz(prev => ({ ...prev, questions: updatedQuestions }));
+    };
+
+    const handleOptionChange = (qIndex, oIndex, value) => {
+        const updatedQuestions = newQuiz.questions.map((q, i) => {
+            if (i === qIndex) {
+                const updatedOptions = [...q.options];
+                updatedOptions[oIndex] = value;
+                return { ...q, options: updatedOptions };
+            }
+            return q;
+        });
+        setNewQuiz(prev => ({ ...prev, questions: updatedQuestions }));
+    };
+
+    const handleQuizSubmit = (e) => {
+        e.preventDefault();
+        onAddOrUpdateQuiz(newQuiz);
+        setNewQuiz({ id: null, title: '', duration: 10, questions: [{ questionText: '', options: ['', '', '', ''], correctAnswerIndex: 0 }] });
+        setEditQuizId(null);
+    };
+
+    const handleEditQuizClick = (quiz) => {
+        setNewQuiz(quiz);
+        setEditQuizId(quiz.id);
+    };
+
+    const handleDeleteQuestion = (index) => {
+        const updatedQuestions = newQuiz.questions.filter((_, i) => i !== index);
+        setNewQuiz(prev => ({ ...prev, questions: updatedQuestions }));
+    };
+
+    return (
+        <div className="container mx-auto py-10 px-4 sm:px-6 lg:px-8">
+            <h2 className="text-3xl sm:text-4xl font-bold text-center mb-8 text-slate-900">Admin Dashboard</h2>
+            <p className="text-center text-sm text-gray-600 mb-8">
+                Logged in as: <span className="font-semibold">{userId}</span>
+            </p>
+
+            {loading && (
+                <div className="flex items-center justify-center mb-4">
+                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+                    <p className="ml-3 text-blue-600">Saving changes...</p>
+                </div>
+            )}
+
+            {/* Manage Website Content */}
+            <div className="bg-white p-8 rounded-lg shadow-lg mb-10 border border-gray-200">
+                <h3 className="text-2xl font-semibold mb-6 text-slate-800">Manage Website Content</h3>
+                <form onSubmit={handleWebsiteSettingsSubmit}>
+                    <div className="mb-4">
+                        <label htmlFor="heroTitle" className="block text-gray-700 text-sm font-bold mb-2">Hero Title:</label>
+                        <input
+                            type="text"
+                            id="heroTitle"
+                            name="heroTitle"
+                            className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            value={websiteSettings.heroTitle || ''}
+                            onChange={handleWebsiteSettingsChange}
+                        />
+                    </div>
+                    <div className="mb-4">
+                        <label htmlFor="heroSubtitle" className="block text-gray-700 text-sm font-bold mb-2">Hero Subtitle:</label>
+                        <textarea
+                            id="heroSubtitle"
+                            name="heroSubtitle"
+                            rows="3"
+                            className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            value={websiteSettings.heroSubtitle || ''}
+                            onChange={handleWebsiteSettingsChange}
+                        ></textarea>
+                    </div>
+                    <div className="mb-4">
+                        <label htmlFor="youtubeLink" className="block text-gray-700 text-sm font-bold mb-2">YouTube Embed Link:</label>
+                        <input
+                            type="url"
+                            id="youtubeLink"
+                            name="youtubeLink"
+                            className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            value={websiteSettings.youtubeLink || ''}
+                            onChange={handleWebsiteSettingsChange}
+                            placeholder="e.g., https://www.youtube.com/embed/VIDEO_ID"
+                        />
+                    </div>
+                    <div className="mb-4">
+                        <label htmlFor="telegramLink" className="block text-gray-700 text-sm font-bold mb-2">Telegram Group Link:</label>
+                        <input
+                            type="url"
+                            id="telegramLink"
+                            name="telegramLink"
+                            className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            value={websiteSettings.telegramLink || ''}
+                            onChange={handleWebsiteSettingsChange}
+                            placeholder="e.g., https://t.me/yourtelegramchannel"
+                        />
+                    </div>
+                    <div className="mb-6">
+                        <label htmlFor="whatsappLink" className="block text-gray-700 text-sm font-bold mb-2">WhatsApp Group Link:</label>
+                        <input
+                            type="url"
+                            id="whatsappLink"
+                            name="whatsappLink"
+                            className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            value={websiteSettings.whatsappLink || ''}
+                            onChange={handleWebsiteSettingsChange}
+                            placeholder="e.g., https://chat.whatsapp.com/yourwhatsappgroup"
+                        />
+                    </div>
+                    <button
+                        type="submit"
+                        className="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-6 rounded-full transition duration-300 ease-in-out transform hover:scale-105"
+                        disabled={loading}
+                    >
+                        Update Website Settings
+                    </button>
+                </form>
+            </div>
+
+            {/* Add/Edit Session Form */}
+            <div className="bg-white p-8 rounded-lg shadow-lg mb-10 border border-gray-200">
+                <h3 className="text-2xl font-semibold mb-6 text-slate-800">{editSessionId ? 'Edit Session' : 'Add New Session'}</h3>
+                <form onSubmit={handleSessionSubmit}>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+                        <div>
+                            <label htmlFor="title" className="block text-gray-700 text-sm font-bold mb-2">Session Title (Topic Name):</label>
+                            <input
+                                type="text"
+                                id="title"
+                                className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                value={newSession.title}
+                                onChange={(e) => setNewSession({ ...newSession, title: e.target.value })}
+                                required
+                            />
+                        </div>
+                        <div>
+                            <label htmlFor="presenterName" className="block text-gray-700 text-sm font-bold mb-2">Presenter Name:</label>
+                            <input
+                                type="text"
+                                id="presenterName"
+                                className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                value={newSession.presenterName}
+                                onChange={(e) => setNewSession({ ...newSession, presenterName: e.target.value })}
+                                required
+                            />
+                        </div>
+                        <div>
+                            <label htmlFor="presenterCollege" className="block text-gray-700 text-sm font-bold mb-2">Presenter College:</label>
+                            <input
+                                type="text"
+                                id="presenterCollege"
+                                className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                value={newSession.presenterCollege}
+                                onChange={(e) => setNewSession({ ...newSession, presenterCollege: e.target.value })}
+                                required
+                            />
+                        </div>
+                        <div>
+                            <label htmlFor="date" className="block text-gray-700 text-sm font-bold mb-2">Date:</label>
+                            <input
+                                type="date"
+                                id="date"
+                                className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                value={newSession.date}
+                                onChange={(e) => setNewSession({ ...newSession, date: e.target.value })}
+                                required
+                            />
+                        </div>
+                        <div>
+                            <label htmlFor="time" className="block text-gray-700 text-sm font-bold mb-2">Time (IST):</label>
+                            <input
+                                type="time"
+                                id="time"
+                                className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                value={newSession.time}
+                                onChange={(e) => setNewSession({ ...newSession, time: e.target.value })}
+                                required
+                            />
+                        </div>
+                        <div>
+                            <label htmlFor="meetingLink" className="block text-gray-700 text-sm font-bold mb-2">Meeting Link (Zoom/Meet):</label>
+                            <input
+                                type="url"
+                                id="meetingLink"
+                                className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                value={newSession.meetingLink}
+                                onChange={(e) => setNewSession({ ...newSession, meetingLink: e.target.value })}
+                                placeholder="e.g., https://zoom.us/j/1234567890"
+                            />
+                        </div>
+                        <div>
+                            <label htmlFor="presenterEmail" className="block text-gray-700 text-sm font-bold mb-2">Presenter Email (for Leaderboard):</label>
+                            <input
+                                type="email"
+                                id="presenterEmail"
+                                className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                value={newSession.presenter} // 'presenter' still holds the email
+                                onChange={(e) => setNewSession({ ...newSession, presenter: e.target.value })}
+                                placeholder="Email for ranking (e.g., doctor@example.com)"
+                                required
+                            />
+                        </div>
+                    </div>
+                    <div className="flex space-x-4">
+                        <button
+                            type="submit"
+                            className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-6 rounded-full transition duration-300 ease-in-out transform hover:scale-105"
+                            disabled={loading}
+                        >
+                            {editSessionId ? 'Update Session' : 'Add Session'}
+                        </button>
+                        {editSessionId && (
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setNewSession({ id: null, title: '', presenter: '', presenterName: '', presenterCollege: '', date: '', time: '', meetingLink: '', approved: false });
+                                    setEditSessionId(null);
+                                }}
+                                className="bg-gray-500 hover:bg-gray-600 text-white font-bold py-2 px-6 rounded-full transition duration-300 ease-in-out transform hover:scale-105"
+                                disabled={loading}
+                            >
+                                Cancel Edit
+                            </button>
+                        )}
+                    </div>
+                </form>
+            </div>
+
+            {/* Current Sessions List */}
+            <div className="bg-white p-8 rounded-lg shadow-lg mb-10 border border-gray-200">
+                <h3 className="text-2xl font-semibold mb-6 text-slate-800">Current Upcoming Sessions</h3>
+                {sessions.length === 0 ? (
+                    <p className="text-gray-600">No sessions added yet.</p>
+                ) : (
+                    <div className="overflow-x-auto">
+                        <table className="min-w-full bg-white rounded-lg overflow-hidden">
+                            <thead className="bg-gray-100 border-b border-gray-200">
+                                <tr>
+                                    <th className="py-3 px-4 text-left text-sm font-semibold text-gray-600">Title</th>
+                                    <th className="py-3 px-4 text-left text-sm font-semibold text-gray-600">Presenter Name</th>
+                                    <th className="py-3 px-4 text-left text-sm font-semibold text-gray-600">College</th>
+                                    <th className="py-3 px-4 text-left text-sm font-semibold text-gray-600">Date</th>
+                                    <th className="py-3 px-4 text-left text-sm font-semibold text-gray-600">Time</th>
+                                    <th className="py-3 px-4 text-left text-sm font-semibold text-gray-600">Link</th>
+                                    <th className="py-3 px-4 text-left text-sm font-semibold text-gray-600">Status</th>
+                                    <th className="py-3 px-4 text-left text-sm font-semibold text-gray-600">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {sessions.map(session => (
+                                    <tr key={session.id} className="border-b border-gray-100 hover:bg-gray-50 transition duration-150">
+                                        <td className="py-3 px-4 text-gray-800">{session.title}</td>
+                                        <td className="py-3 px-4 text-gray-800">{session.presenterName || 'N/A'}</td>
+                                        <td className="py-3 px-4 text-gray-800">{session.presenterCollege || 'N/A'}</td>
+                                        <td className="py-3 px-4 text-gray-800">{session.date}</td>
+                                        <td className="py-3 px-4 text-gray-800">{session.time}</td>
+                                        <td className="py-3 px-4 text-gray-800">
+                                            {session.meetingLink ? (
+                                                <a href={session.meetingLink} target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline">Link</a>
+                                            ) : 'N/A'}
+                                        </td>
+                                        <td className="py-3 px-4">
+                                            <span className={`px-2 py-1 rounded-full text-xs font-semibold ${session.approved ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'}`}>
+                                                {session.approved ? 'Approved' : 'Pending'}
+                                            </span>
+                                        </td>
+                                        <td className="py-3 px-4 flex space-x-2">
+                                            <button
+                                                onClick={() => handleEditSessionClick(session)}
+                                                className="bg-yellow-500 hover:bg-yellow-600 text-white py-1 px-3 rounded-full text-sm transition duration-200"
+                                            >
+                                                Edit
+                                            </button>
+                                            {!session.approved ? (
+                                                <button
+                                                    onClick={() => onUpdateSessionApproval(session.id, true)}
+                                                    className="bg-green-500 hover:bg-green-600 text-white py-1 px-3 rounded-full text-sm transition duration-200"
+                                                >
+                                                    Approve
+                                                </button>
+                                            ) : (
+                                                <button
+                                                    onClick={() => onUpdateSessionApproval(session.id, false)}
+                                                    className="bg-orange-500 hover:bg-orange-600 text-white py-1 px-3 rounded-full text-sm transition duration-200"
+                                                >
+                                                    Reject
+                                                </button>
+                                            )}
+                                            <button
+                                                onClick={() => onDeleteSession(session.id)}
+                                                className="bg-red-500 hover:bg-red-600 text-white py-1 px-3 rounded-full text-sm transition duration-200"
+                                            >
+                                                Delete
+                                            </button>
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                )}
+            </div>
+
+            {/* Add/Edit Quiz Form */}
+            <div className="bg-white p-8 rounded-lg shadow-lg mb-10 border border-gray-200">
+                <h3 className="text-2xl font-semibold mb-6 text-slate-800">{editQuizId ? 'Edit Quiz' : 'Add New Quiz'}</h3>
+                <form onSubmit={handleQuizSubmit}>
+                    <div className="mb-4">
+                        <label htmlFor="quizTitle" className="block text-gray-700 text-sm font-bold mb-2">Quiz Title:</label>
+                        <input
+                            type="text"
+                            id="quizTitle"
+                            name="quizTitle"
+                            className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-purple-500"
+                            value={newQuiz.title}
+                            onChange={(e) => setNewQuiz({ ...newQuiz, title: e.target.value })}
+                            required
+                        />
+                    </div>
+                    <div className="mb-6">
+                        <label htmlFor="quizDuration" className="block text-gray-700 text-sm font-bold mb-2">Duration (minutes):</label>
+                        <input
+                            type="number"
+                            id="quizDuration"
+                            name="quizDuration"
+                            className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-purple-500"
+                            value={newQuiz.duration}
+                            onChange={(e) => setNewQuiz({ ...newQuiz, duration: parseInt(e.target.value) || 0 })}
+                            min="1"
+                            required
+                        />
+                    </div>
+
+                    <h4 className="text-xl font-semibold mb-4 text-slate-700">Questions:</h4>
+                    {newQuiz.questions.map((q, qIndex) => (
+                        <div key={qIndex} className="bg-gray-50 p-6 rounded-lg mb-6 border border-gray-200">
+                            <div className="flex justify-between items-center mb-4">
+                                <h5 className="font-semibold text-lg text-slate-800">Question {qIndex + 1}</h5>
+                                <button
+                                    type="button"
+                                    onClick={() => handleDeleteQuestion(qIndex)}
+                                    className="bg-red-500 hover:bg-red-600 text-white py-1 px-3 rounded-full text-sm"
+                                >
+                                    Delete Question
+                                </button>
+                            </div>
+                            <div className="mb-4">
+                                <label htmlFor={`questionText-${qIndex}`} className="block text-gray-700 text-sm font-bold mb-2">Question Text:</label>
+                                <textarea
+                                    id={`questionText-${qIndex}`}
+                                    rows="3"
+                                    className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-purple-500"
+                                    value={q.questionText}
+                                    onChange={(e) => handleQuestionChange(qIndex, 'questionText', e.target.value)}
+                                    required
+                                ></textarea>
+                            </div>
+                            <div className="mb-4">
+                                <label className="block text-gray-700 text-sm font-bold mb-2">Options:</label>
+                                {q.options.map((option, oIndex) => (
+                                    <div key={oIndex} className="flex items-center mb-2">
+                                        <input
+                                            type="radio"
+                                            name={`correctOption-${qIndex}`}
+                                            checked={q.correctAnswerIndex === oIndex}
+                                            onChange={() => handleQuestionChange(qIndex, 'correctAnswerIndex', oIndex)}
+                                            className="mr-2 text-purple-600 focus:ring-purple-500"
+                                        />
+                                        <input
+                                            type="text"
+                                            className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-purple-500"
+                                            value={option}
+                                            onChange={(e) => handleOptionChange(qIndex, oIndex, e.target.value)}
+                                            placeholder={`Option ${oIndex + 1}`}
+                                            required
+                                        />
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    ))}
+                    <button
+                        type="button"
+                        onClick={handleAddQuestion}
+                        className="bg-purple-500 hover:bg-purple-600 text-white font-bold py-2 px-4 rounded-full transition duration-300 ease-in-out transform hover:scale-105 mb-6"
+                    >
+                        Add Question
+                    </button>
+                    <div className="flex space-x-4">
+                        <button
+                            type="submit"
+                            className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-6 rounded-full transition duration-300 ease-in-out transform hover:scale-105"
+                            disabled={loading}
+                        >
+                            {editQuizId ? 'Update Quiz' : 'Add Quiz'}
+                        </button>
+                        {editQuizId && (
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setNewQuiz({ id: null, title: '', duration: 10, questions: [{ questionText: '', options: ['', '', '', ''], correctAnswerIndex: 0 }] });
+                                    setEditQuizId(null);
+                                }}
+                                className="bg-gray-500 hover:bg-gray-600 text-white font-bold py-2 px-6 rounded-full transition duration-300 ease-in-out transform hover:scale-105"
+                                disabled={loading}
+                            >
+                                Cancel Edit
+                            </button>
+                        )}
+                    </div>
+                </form>
+            </div>
+
+            {/* Current Quizzes List */}
+            <div className="bg-white p-8 rounded-lg shadow-lg mb-10 border border-gray-200">
+                <h3 className="text-2xl font-semibold mb-6 text-slate-800">Current Quizzes</h3>
+                {quizzes.length === 0 ? (
+                    <p className="text-gray-600">No quizzes added yet.</p>
+                ) : (
+                    <div className="overflow-x-auto">
+                        <table className="min-w-full bg-white rounded-lg overflow-hidden">
+                            <thead className="bg-gray-100 border-b border-gray-200">
+                                <tr>
+                                    <th className="py-3 px-4 text-left text-sm font-semibold text-gray-600">Title</th>
+                                    <th className="py-3 px-4 text-left text-sm font-semibold text-gray-600">Questions</th>
+                                    <th className="py-3 px-4 text-left text-sm font-semibold text-gray-600">Duration (min)</th>
+                                    <th className="py-3 px-4 text-left text-sm font-semibold text-gray-600">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {quizzes.map(quiz => (
+                                    <tr key={quiz.id} className="border-b border-gray-100 hover:bg-gray-50 transition duration-150">
+                                        <td className="py-3 px-4 text-gray-800">{quiz.title}</td>
+                                        <td className="py-3 px-4 text-gray-800">{quiz.questions ? quiz.questions.length : 0}</td>
+                                        <td className="py-3 px-4 text-gray-800">{quiz.duration}</td>
+                                        <td className="py-3 px-4 flex space-x-2">
+                                            <button
+                                                onClick={() => handleEditQuizClick(quiz)}
+                                                className="bg-yellow-500 hover:bg-yellow-600 text-white py-1 px-3 rounded-full text-sm transition duration-200"
+                                            >
+                                                Edit
+                                            </button>
+                                            <button
+                                                onClick={() => onDeleteQuiz(quiz.id)}
+                                                className="bg-red-500 hover:bg-red-600 text-white py-1 px-3 rounded-full text-sm transition duration-200"
+                                            >
+                                                Delete
+                                            </button>
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+};
+
+// Quiz Page Component
+const QuizPage = ({ quiz, participantId, onSubmitResults, onQuizEnd, loading }) => {
+    const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
+    const [selectedAnswers, setSelectedAnswers] = useState(Array(quiz.questions.length).fill(null));
+    const [timeLeft, setTimeLeft] = useState(quiz.duration * 60); // seconds
+    const [quizStarted, setQuizStarted] = useState(false);
+    const [quizEnded, setQuizEnded] = useState(false);
+    const timerRef = useRef(null);
+    const quizContainerRef = useRef(null); // Ref for the quiz container to apply restrictions
+
+    // Prevent navigation away from the quiz
+    useEffect(() => {
+        const handleBeforeUnload = (event) => {
+            if (!quizEnded) {
+                event.preventDefault();
+                event.returnValue = ''; // Required for some browsers
+            }
+        };
+
+        const handleVisibilityChange = () => {
+            if (document.hidden && !quizEnded) {
+                // Optionally, pause timer or submit quiz if user leaves tab/window
+                // For this implementation, we'll just log a warning.
+                console.warn("User left the quiz window!");
+                // You could also automatically submit the quiz here:
+                // handleSubmitQuiz(true);
+            }
+        };
+
+        window.addEventListener('beforeunload', handleBeforeUnload);
+        document.addEventListener('visibilitychange', handleVisibilityChange);
+
+        // Disable copy, cut, paste
+        const disableClipboard = (e) => e.preventDefault();
+        const quizElement = quizContainerRef.current;
+        if (quizElement) {
+            quizElement.addEventListener('copy', disableClipboard);
+            quizElement.addEventListener('cut', disableClipboard);
+            quizElement.addEventListener('paste', disableClipboard);
+        }
+
+        return () => {
+            window.removeEventListener('beforeunload', handleBeforeUnload);
+            document.removeEventListener('visibilitychange', handleVisibilityChange);
+            if (quizElement) {
+                quizElement.removeEventListener('copy', disableClipboard);
+                quizElement.removeEventListener('cut', disableClipboard);
+                quizElement.removeEventListener('paste', disableClipboard);
+            }
+        };
+    }, [quizEnded]);
+
+    // Timer logic
+    useEffect(() => {
+        if (quizStarted && !quizEnded && timeLeft > 0) {
+            timerRef.current = setInterval(() => {
+                setTimeLeft(prevTime => prevTime - 1);
+            }, 1000);
+        } else if (timeLeft === 0 && !quizEnded) {
+            handleSubmitQuiz(true); // Auto-submit when time runs out
+        }
+
+        return () => clearInterval(timerRef.current);
+    }, [quizStarted, quizEnded, timeLeft]);
+
+    const formatTime = (seconds) => {
+        const minutes = Math.floor(seconds / 60);
+        const remainingSeconds = seconds % 60;
+        return `${minutes.toString().padStart(2, '0')}:${remainingSeconds.toString().padStart(2, '0')}`;
+    };
+
+    const handleStartQuiz = () => {
+        setQuizStarted(true);
+        setTimeLeft(quiz.duration * 60);
+    };
+
+    const handleOptionSelect = (optionIndex) => {
+        const newSelectedAnswers = [...selectedAnswers];
+        newSelectedAnswers[currentQuestionIndex] = optionIndex;
+        setSelectedAnswers(newSelectedAnswers);
+    };
+
+    const handleNextQuestion = () => {
+        if (currentQuestionIndex < quiz.questions.length - 1) {
+            setCurrentQuestionIndex(prevIndex => prevIndex + 1);
+        }
+    };
+
+    const handlePreviousQuestion = () => {
+        if (currentQuestionIndex > 0) {
+            setCurrentQuestionIndex(prevIndex => prevIndex - 1);
+        }
+    };
+
+    const handleSubmitQuiz = (timedOut = false) => {
+        clearInterval(timerRef.current);
+        setQuizEnded(true);
+
+        let score = 0;
+        quiz.questions.forEach((q, index) => {
+            if (selectedAnswers[index] === q.correctAnswerIndex) {
+                score++;
+            }
+        });
+
+        const durationTaken = quiz.duration * 60 - timeLeft; // Time actually taken in seconds
+        onSubmitResults(quiz.id, participantId, selectedAnswers, score, quiz.questions.length, durationTaken);
+    };
+
+    const currentQuestion = quiz.questions[currentQuestionIndex];
+
+    if (!quizStarted) {
+        return (
+            <div className="flex items-center justify-center min-h-[calc(100vh-80px)] bg-gray-50">
+                <div className="bg-white p-8 rounded-lg shadow-xl w-full max-w-lg text-center">
+                    <h2 className="text-3xl font-bold mb-4 text-slate-900">{quiz.title}</h2>
+                    <p className="text-gray-700 mb-2">Questions: {quiz.questions.length}</p>
+                    <p className="text-gray-700 mb-6">Duration: {quiz.duration} minutes</p>
+                    <button
+                        onClick={handleStartQuiz}
+                        className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-8 rounded-full transition duration-300 ease-in-out transform hover:scale-105"
+                    >
+                        Start Quiz
+                    </button>
+                </div>
+            </div>
+        );
+    }
+
+    if (quizEnded) {
+        return (
+            <div className="flex items-center justify-center min-h-[calc(100vh-80px)] bg-gray-50">
+                <div className="bg-white p-8 rounded-lg shadow-xl w-full max-w-lg text-center">
+                    <h2 className="text-3xl font-bold mb-4 text-slate-900">Quiz Ended!</h2>
+                    <p className="text-gray-700 mb-6">Your results are being processed...</p>
+                    {loading && (
+                        <div className="flex items-center justify-center">
+                            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+                            <p className="ml-3 text-blue-600">Submitting...</p>
+                        </div>
+                    )}
+                </div>
+            </div>
+        );
+    }
+
+    return (
+        <div ref={quizContainerRef} className="flex flex-col items-center justify-center min-h-[calc(100vh-80px)] bg-gray-50 p-4">
+            <div className="bg-white p-8 rounded-lg shadow-xl w-full max-w-2xl">
+                <div className="flex justify-between items-center mb-6">
+                    <span className="text-xl font-bold text-slate-900">Question {currentQuestionIndex + 1} / {quiz.questions.length}</span>
+                    <span className={`text-2xl font-bold ${timeLeft <= 30 ? 'text-red-600 animate-pulse' : 'text-blue-600'}`}>
+                        Time Left: {formatTime(timeLeft)}
+                    </span>
+                </div>
+                <p className="text-lg mb-6 text-slate-800 font-semibold">{currentQuestion.questionText}</p>
+                <div className="space-y-4 mb-8">
+                    {currentQuestion.options.map((option, index) => (
+                        <label key={index} className="flex items-center bg-gray-100 p-4 rounded-lg cursor-pointer hover:bg-gray-200 transition duration-200">
+                            <input
+                                type="radio"
+                                name="quizOption"
+                                value={index}
+                                checked={selectedAnswers[currentQuestionIndex] === index}
+                                onChange={() => handleOptionSelect(index)}
+                                className="mr-3 h-5 w-5 text-blue-600 focus:ring-blue-500"
+                            />
+                            <span className="text-gray-800">{option}</span>
+                        </label>
+                    ))}
+                </div>
+                <div className="flex justify-between">
+                    <button
+                        onClick={handlePreviousQuestion}
+                        disabled={currentQuestionIndex === 0 || loading}
+                        className="bg-gray-500 hover:bg-gray-600 text-white font-bold py-2 px-6 rounded-full transition duration-300 ease-in-out transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                        Previous
+                    </button>
+                    {currentQuestionIndex < quiz.questions.length - 1 ? (
+                        <button
+                            onClick={handleNextQuestion}
+                            disabled={loading}
+                            className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-6 rounded-full transition duration-300 ease-in-out transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                            Next
+                        </button>
+                    ) : (
+                        <button
+                            onClick={() => handleSubmitQuiz()}
+                            disabled={loading}
+                            className="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-6 rounded-full transition duration-300 ease-in-out transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                            Submit Quiz
+                        </button>
+                    )}
+                </div>
+            </div>
+        </div>
+    );
+};
+
+// Quiz Results Page Component
+const QuizResultsPage = ({ quizResults, quizzes, onReturnHome }) => {
+    const quiz = quizzes.find(q => q.id === quizResults.quizId);
+
+    if (!quiz) {
+        return (
+            <div className="flex items-center justify-center min-h-[calc(100vh-80px)] bg-gray-50">
+                <div className="bg-white p-8 rounded-lg shadow-xl w-full max-w-lg text-center">
+                    <h2 className="text-3xl font-bold mb-4 text-slate-900">Quiz Not Found</h2>
+                    <button
+                        onClick={onReturnHome}
+                        className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-8 rounded-full transition duration-300 ease-in-out transform hover:scale-105 mt-6"
+                    >
+                        Return to Home
+                    </button>
+                </div>
+            </div>
+        );
+    };
+
+    return (
+        <div className="container mx-auto py-10 px-4 sm:px-6 lg:px-8">
+            <div className="bg-white p-8 rounded-lg shadow-xl w-full max-w-3xl mx-auto">
+                <h2 className="text-3xl font-bold text-center mb-6 text-slate-900">Quiz Results: {quiz.title}</h2>
+                <div className="text-center mb-8">
+                    <p className="text-2xl font-semibold text-blue-700">Your Score: {quizResults.score} / {quizResults.totalQuestions}</p>
+                    <p className="text-gray-600">Time Taken: {Math.floor(quizResults.durationTaken / 60)}m {quizResults.durationTaken % 60}s</p>
+                </div>
+
+                <div className="space-y-6">
+                    {quiz.questions.map((q, index) => {
+                        const userAnswerIndex = quizResults.answers[index];
+                        const isCorrect = userAnswerIndex === q.correctAnswerIndex;
+
+                        return (
+                            <div key={index} className={`p-4 rounded-lg border ${isCorrect ? 'border-green-400 bg-green-50' : 'border-red-400 bg-red-50'}`}>
+                                <p className="font-semibold text-lg mb-2">{index + 1}. {q.questionText}</p>
+                                <div className="space-y-2">
+                                    {q.options.map((option, oIndex) => (
+                                        <div key={oIndex} className="flex items-center">
+                                            <span className={`mr-2 ${oIndex === q.correctAnswerIndex ? 'text-green-600 font-bold' : ''} ${oIndex === userAnswerIndex && !isCorrect ? 'text-red-600 font-bold' : ''}`}>
+                                                {oIndex === q.correctAnswerIndex && '✅ '}
+                                                {oIndex === userAnswerIndex && !isCorrect && '❌ '}
+                                                {option}
+                                            </span>
+                                        </div>
+                                    ))}
+                                </div>
+                                {!isCorrect && (
+                                    <p className="mt-2 text-sm text-red-700">Correct Answer: {q.options[q.correctAnswerIndex]}</p>
+                                )}
+                            </div>
+                        );
+                    })}
+                </div>
+
+                <div className="text-center mt-8">
+                    <button
+                        onClick={onReturnHome}
+                        className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-8 rounded-full transition duration-300 ease-in-out transform hover:scale-105"
+                    >
+                        Return to Home
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+
+// Leaderboard Component
+const Leaderboard = ({ sessions, currentUserEmail }) => {
+    const [leaderboardData, setLeaderboardData] = useState([]);
+    const [userRank, setUserRank] = useState(null);
+    const [userPresentations, setUserPresentations] = useState(0);
+
+    useEffect(() => {
+        const calculateLeaderboard = () => {
+            const presenterCounts = {};
+            sessions.forEach(session => {
+                if (session.approved && session.presenter) { // Use 'presenter' (email) for ranking
+                    presenterCounts[session.presenter] = (presenterCounts[session.presenter] || 0) + 1;
+                }
+            });
+
+            const sortedLeaderboard = Object.entries(presenterCounts)
+                .map(([presenterEmail, count]) => ({ presenterEmail, count }))
+                .sort((a, b) => b.count - a.count); // Sort descending by count
+            
+            setLeaderboardData(sortedLeaderboard);
+
+            // Calculate current user's rank
+            if (currentUserEmail) {
+                const userEntry = sortedLeaderboard.find(entry => entry.presenterEmail === currentUserEmail);
+                if (userEntry) {
+                    const rank = sortedLeaderboard.findIndex(entry => entry.presenterEmail === currentUserEmail) + 1;
+                    setUserRank(rank);
+                    setUserPresentations(userEntry.count);
+                } else {
+                    setUserRank(null);
+                    setUserPresentations(0);
+                }
+            } else {
+                setUserRank(null);
+                setUserPresentations(0);
+            }
+        };
+
+        calculateLeaderboard();
+    }, [sessions, currentUserEmail]); // Recalculate when sessions or current user email changes
+
+    return (
+        <section className="py-16 px-4 sm:px-6 lg:px-8 bg-white">
+            <div className="container mx-auto">
+                <h2 className="text-3xl sm:text-4xl font-bold text-center mb-12 text-slate-900">Top Presenters Leaderboard</h2>
+
+                {currentUserEmail && (
+                    <div className="bg-blue-50 p-6 rounded-lg shadow-md mb-8 border border-blue-200 text-center max-w-md mx-auto">
+                        <h3 className="text-xl font-semibold text-blue-800 mb-2">Your Presenter Ranking</h3>
+                        {userRank !== null ? (
+                            <p className="text-lg text-blue-700">
+                                You are ranked <span className="font-bold text-2xl">{userRank}</span> with <span className="font-bold text-2xl">{userPresentations}</span> presentations.
+                            </p>
+                        ) : (
+                            <p className="text-lg text-gray-700">You haven't presented any sessions yet.</p>
+                        )}
+                    </div>
+                )}
+
+                {leaderboardData.length === 0 ? (
+                    <p className="text-center text-gray-600">No presentations yet to display on the leaderboard.</p>
+                ) : (
+                    <div className="max-w-md mx-auto bg-gray-50 rounded-lg shadow-md p-6 border border-gray-200">
+                        <ul className="divide-y divide-gray-200">
+                            {leaderboardData.map((entry, index) => (
+                                <li key={entry.presenterEmail} className="py-3 flex justify-between items-center">
+                                    <span className="font-semibold text-lg text-slate-800">
+                                        {index + 1}. {entry.presenterEmail} {/* Display email for now */}
+                                    </span>
+                                    <span className="text-blue-600 font-bold text-xl">
+                                        {entry.count}
+                                        <span className="text-sm text-gray-500 ml-1">presentations</span>
+                                    </span>
+                                </li>
+                            ))}
+                        </ul>
+                    </div>
+                )}
+            </div>
+        </section>
+    );
+};
+
+export default App;
